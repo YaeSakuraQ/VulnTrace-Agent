@@ -133,6 +133,7 @@
           <n-input-number v-model:value="form.maxSteps" :min="1" :max="20" />
         </n-form-item>
 
+
         <n-form-item class="task-form-grid__wide" label="授权说明">
           <n-input
             v-model:value="form.authorization"
@@ -159,6 +160,40 @@
             :autosize="{ minRows: 3, maxRows: 5 }"
           />
         </n-form-item>
+
+        <n-collapse class="task-form-grid__wide">
+          <n-collapse-item title="Advanced Options" name="advanced">
+            <div class="stack">
+              <n-form-item label="风险容忍度">
+                <n-select
+                  v-model:value="form.riskTolerance"
+                  :options="riskToleranceOptions"
+                  placeholder="选择风险容忍度"
+                />
+              </n-form-item>
+
+              <n-form-item label="工具开关">
+                <n-checkbox-group v-model:value="form.enabledTools">
+                  <n-space>
+                    <n-checkbox v-for="tool in availableTools" :key="tool" :value="tool" :label="tool" />
+                  </n-space>
+                </n-checkbox-group>
+              </n-form-item>
+
+              <n-form-item label="扫描强度">
+                <n-select
+                  v-model:value="form.scanIntensity"
+                  :options="scanIntensityOptions"
+                  placeholder="选择扫描强度"
+                />
+              </n-form-item>
+
+              <n-form-item label="自动批准低风险动作">
+                <n-switch v-model:value="form.autoApproveLowRisk" />
+              </n-form-item>
+            </div>
+          </n-collapse-item>
+        </n-collapse>
       </n-form>
 
       <div class="actions-row">
@@ -197,10 +232,17 @@ import { RouterLink } from 'vue-router'
 import {
   NButton,
   NCard,
+  NCheckbox,
+  NCheckboxGroup,
+  NCollapse,
+  NCollapseItem,
   NForm,
   NFormItem,
   NInput,
   NInputNumber,
+  NSelect,
+  NSpace,
+  NSwitch,
   NTag,
 } from 'naive-ui'
 import { Rocket, RotateCcw, Save } from '@lucide/vue'
@@ -227,24 +269,61 @@ const form = reactive({
   objective: '识别主机与服务，完成低风险验证并生成报告。',
   ports: '1-1024',
   maxSteps: 8,
+  riskTolerance: 'moderate',
+  enabledTools: [
+    'nmap_service_scan',
+    'http_snapshot',
+    'vuln_verify',
+    'dir_enum',
+  ],
+  scanIntensity: 'medium',
+  autoApproveLowRisk: false,
 })
+
+const riskToleranceOptions = [
+  { label: 'Strict', value: 'strict' },
+  { label: 'Moderate', value: 'moderate' },
+  { label: 'Relaxed', value: 'relaxed' },
+]
+
+const scanIntensityOptions = [
+  { label: 'Light', value: 'light' },
+  { label: 'Medium', value: 'medium' },
+  { label: 'Deep', value: 'deep' },
+]
+
+const availableTools = [
+  'nmap_service_scan',
+  'http_snapshot',
+  'vuln_verify',
+  'dir_enum',
+  'ffuf_enum',
+]
 
 const selectedTemplate = computed(
   () => props.templates.find((template) => template.id === selectedTemplateId.value) || null
 )
+
 const existingTemplateTask = computed(() => {
   if (!selectedTemplate.value) {
     return null
   }
 
-  const preferences = {
-    dvwa: ['DVWA FI PoC Report Chain', 'DVWA Real Verification Run', 'DVWA'],
-    vulhub: ['Vulhub mini_httpd Live Demo', 'Vulhub'],
-  }
+  const template = selectedTemplate.value
+  const candidates = [
+    template.title,
+    template.id,
+    template.lab_type,
+    ...(template.defaults?.name ? [template.defaults.name] : []),
+  ].filter(Boolean)
 
-  const orderedNames = preferences[selectedTemplate.value.id] || [selectedTemplate.value.title]
-  for (const keyword of orderedNames) {
-    const found = props.tasks.find((task) => task.name.includes(keyword))
+  for (const keyword of candidates) {
+    const found = props.tasks.find(
+      (task) =>
+        task.name &&
+        keyword &&
+        task.name.toLowerCase().includes(keyword.toLowerCase())
+    )
     if (found) {
       return found
     }
@@ -297,6 +376,10 @@ function submitForm(autoRun = false) {
     ports: form.ports,
     max_steps: form.maxSteps,
     auto_run: autoRun,
+    risk_tolerance: form.riskTolerance,
+    enabled_tools: form.enabledTools,
+    scan_intensity: form.scanIntensity,
+    auto_approve_low_risk: form.autoApproveLowRisk,
   })
 }
 </script>

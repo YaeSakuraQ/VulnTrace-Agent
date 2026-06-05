@@ -16,7 +16,9 @@ def execute(params: HeaderMutationInput, context: ToolContext) -> ToolExecutionR
         + params.body
     )
     try:
-        response = _send_raw_http_request(params.target, params.port, request)
+        response = _send_raw_http_request(
+            params.target, params.port, request, timeout=params.timeout
+        )
     except OSError as exc:
         raise ToolExecutionError(f"Header mutation request failed: {exc}") from exc
 

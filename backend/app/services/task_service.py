@@ -53,6 +53,7 @@ class TaskService:
             "stop_reason": None,
             "max_steps": payload.max_steps,
             "step_count": 0,
+            "risk_tolerance": getattr(payload, "risk_tolerance", "moderate"),
         }
 
         with self.database.connection() as conn:

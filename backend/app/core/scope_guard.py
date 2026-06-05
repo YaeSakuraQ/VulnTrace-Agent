@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class ScopeValidationError(ValueError):
@@ -12,6 +13,7 @@ class ScopeValidationError(ValueError):
 @dataclass(slots=True)
 class ScopeGuard:
     allow_public_targets: bool = False
+    explicitly_allowed: set[str] = field(default_factory=set)
 
     def validate_scope(self, scope_entries: list[str]) -> list[str]:
         if not scope_entries:
@@ -71,10 +73,32 @@ class ScopeGuard:
         except ValueError:
             pass
 
+        # Resolve hostname via asyncio.getaddrinfo (or sync fallback).
         try:
-            results = socket.getaddrinfo(target, None, proto=socket.IPPROTO_TCP)
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # No running event loop — safe to spin one up for the coroutine.
+                async def _getaddrinfo():
+                    return await loop.getaddrinfo(
+                        target, None, proto=socket.IPPROTO_TCP
+                    )
+
+                results = asyncio.run(_getaddrinfo())
+            else:
+                # An event loop is already running (e.g. FastAPI handler).
+                # Fall back to the synchronous resolver so we do not nest loops.
+                results = socket.getaddrinfo(target, None, proto=socket.IPPROTO_TCP)
         except socket.gaierror as exc:
-            raise ScopeValidationError(f"Unable to resolve target {target}: {exc}") from exc
+            raise ScopeValidationError(
+                f"Unable to resolve target {target}: {exc}"
+            ) from exc
 
         ips: list[ipaddress._BaseAddress] = []
         for family, _, _, _, sockaddr in results:
@@ -92,10 +116,23 @@ class ScopeGuard:
             raise ScopeValidationError(f"Address {ip_addr} is not allowed.")
         if getattr(ip_addr, "is_loopback", False):
             return
+        # Check explicit allow-list first (CIDR strings or single IPs).
+        if self._ip_in_explicit_allowlist(ip_addr):
+            return
         if not self.allow_public_targets and not ip_addr.is_private:
             raise ScopeValidationError(
                 f"Public or externally routable address {ip_addr} is not allowed."
             )
+
+    def _ip_in_explicit_allowlist(self, ip_addr: ipaddress._BaseAddress) -> bool:
+        for entry in self.explicitly_allowed:
+            try:
+                network = ipaddress.ip_network(entry, strict=False)
+            except ValueError:
+                continue
+            if ip_addr in network:
+                return True
+        return False
 
     def _ip_in_scope(
         self, ip_addr: ipaddress._BaseAddress, scope_entries: list[str]

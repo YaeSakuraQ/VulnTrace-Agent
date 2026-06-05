@@ -43,7 +43,7 @@
             </div>
           </template>
 
-          <article v-if="report?.markdown" class="report-document" v-html="html"></article>
+          <article v-if="report?.markdown" class="report-document" v-html="sanitizedHtml"></article>
           <n-empty v-else description="报告尚未生成" />
         </n-card>
       </n-tab-pane>
@@ -212,6 +212,7 @@ import {
   NTag,
 } from 'naive-ui'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
 import {
   countConfirmedFindings,
@@ -245,17 +246,13 @@ const findings = computed(() => props.task?.state?.findings || [])
 const pocs = computed(() => props.task?.state?.pocs || [])
 const confirmedFindingCount = computed(() => countConfirmedFindings(findings.value))
 
-const html = computed(() => marked.parse(rewriteArtifactPaths(props.report?.markdown || '')))
+const sanitizedHtml = computed(() => {
+  const rawMarkdown = props.report?.markdown || ''
+  const html = marked.parse(rawMarkdown)
+  return DOMPurify.sanitize(html)
+})
 
 function formatJson(value) {
   return JSON.stringify(value, null, 2)
-}
-
-function rewriteArtifactPaths(markdownText) {
-  if (!markdownText) {
-    return ''
-  }
-
-  return markdownText.replace(/`\/root\/Desktop\/Agent Project\/([^`]+)`/g, '`$1`')
 }
 </script>

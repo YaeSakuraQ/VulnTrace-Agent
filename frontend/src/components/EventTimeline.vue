@@ -15,7 +15,7 @@
         <n-timeline-item
           v-for="event in orderedEvents"
           :key="event.id"
-          type="success"
+          :type="eventTimelineType(event.event_type)"
           :title="event.event_type"
           :content="event.message"
           :time="formatDateTime(event.created_at)"
@@ -43,5 +43,18 @@ const props = defineProps({
   },
 })
 
-const orderedEvents = computed(() => props.events.slice().reverse())
+const orderedEvents = computed(() =>
+  (props.events || []).slice().reverse()
+)
+
+function eventTimelineType(eventType) {
+  const typeMap = {
+    tool_completed: 'success',
+    tool_failed: 'error',
+    approval_requested: 'warning',
+    task_paused: 'info',
+    task_stopped: 'info',
+  }
+  return typeMap[eventType] || 'default'
+}
 </script>

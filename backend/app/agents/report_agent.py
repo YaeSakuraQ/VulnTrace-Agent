@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 import markdown
 
+from app.agents.constants import VERIFICATION_TOOLS
 from app.schemas.task import ArtifactRecord, TaskDetail, TaskEvent
 from app.services.artifact_store import ArtifactStore
 from app.schemas.approval import ApprovalRecord
@@ -515,7 +516,7 @@ class ReportAgent:
         verification_actions = [
             item
             for item in actions
-            if item.get("tool_name") in {"vuln_verify", "header_mutation", "raw_http", "tcp_send"}
+            if item.get("tool_name") in VERIFICATION_TOOLS
         ]
         failed_verifications = [
             item for item in verification_actions if not item.get("success", True)

@@ -130,8 +130,12 @@ export function relativeArtifactPath(path) {
     return ''
   }
 
-  const marker = '/root/Desktop/Agent Project/'
-  return path.startsWith(marker) ? path.slice(marker.length) : path
+  const artifactsIdx = path.indexOf('artifacts/')
+  if (artifactsIdx !== -1) {
+    return path.slice(artifactsIdx)
+  }
+
+  return path
 }
 
 export function fileNameFromPath(path) {

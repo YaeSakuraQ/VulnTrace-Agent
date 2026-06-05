@@ -4,18 +4,25 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.core.config import Settings
-from app.core.risk_policy import get_policy
+from app.core.risk_policy import RiskTolerance, get_policy
 from app.core.scope_guard import ScopeGuard
 from app.schemas.tool import (
     AssetDiscoveryInput,
+    DefaultCredsInput,
     DirEnumInput,
     FfufEnumInput,
+    FtpAnonInput,
     HeaderMutationInput,
     HttpGetInput,
     HttpRequestInput,
     HttpSnapshotInput,
+    MongoDBCheckInput,
     RawHttpInput,
+    RedisCheckInput,
     ServiceFingerprintInput,
+    SmbEnumInput,
+    SqliProbeInput,
+    SshVersionInput,
     TcpSendInput,
     TemplateRunnerInput,
     ToolExecutionResult,
@@ -25,15 +32,22 @@ from app.schemas.tool import (
 from app.services.artifact_store import ArtifactStore
 from app.tools import (
     asset_discovery,
+    default_creds,
     dir_enum,
     ffuf_enum,
+    ftp_anon,
     header_mutation,
     http_get,
     http_request,
     http_snapshot,
+    mongodb_check,
     raw_http,
+    redis_check,
     report_tool,
     service_fingerprint,
+    smb_enum,
+    sqli_probe,
+    ssh_version,
     tcp_send,
     template_runner,
     vuln_verify,
@@ -180,6 +194,70 @@ class ToolExecutor:
                 allowed_stages=("*",),
                 handler=report_tool.execute,
             ),
+            # ── New tools ──────────────────────────────────────────────
+            "ssh_version": ToolSpec(
+                name="ssh_version",
+                description="SSH version fingerprinting via banner grab and ssh -v.",
+                input_model=SshVersionInput,
+                risk_level=get_policy("ssh_version").risk_level,
+                approval_required=get_policy("ssh_version").approval_required,
+                allowed_stages=("service_fingerprint", "exploit"),
+                handler=ssh_version.execute,
+            ),
+            "ftp_anon": ToolSpec(
+                name="ftp_anon",
+                description="Anonymous FTP login check against a bounded credential set.",
+                input_model=FtpAnonInput,
+                risk_level=get_policy("ftp_anon").risk_level,
+                approval_required=get_policy("ftp_anon").approval_required,
+                allowed_stages=("service_fingerprint", "exploit"),
+                handler=ftp_anon.execute,
+            ),
+            "smb_enum": ToolSpec(
+                name="smb_enum",
+                description="SMB share enumeration and version detection via negotiate protocol.",
+                input_model=SmbEnumInput,
+                risk_level=get_policy("smb_enum").risk_level,
+                approval_required=get_policy("smb_enum").approval_required,
+                allowed_stages=("service_fingerprint", "exploit"),
+                handler=smb_enum.execute,
+            ),
+            "redis_check": ToolSpec(
+                name="redis_check",
+                description="Redis unauthorized access check using PING / INFO / CONFIG GET.",
+                input_model=RedisCheckInput,
+                risk_level=get_policy("redis_check").risk_level,
+                approval_required=get_policy("redis_check").approval_required,
+                allowed_stages=("service_fingerprint", "exploit"),
+                handler=redis_check.execute,
+            ),
+            "mongodb_check": ToolSpec(
+                name="mongodb_check",
+                description="MongoDB unauthorized access check using ismaster wire protocol.",
+                input_model=MongoDBCheckInput,
+                risk_level=get_policy("mongodb_check").risk_level,
+                approval_required=get_policy("mongodb_check").approval_required,
+                allowed_stages=("service_fingerprint", "exploit"),
+                handler=mongodb_check.execute,
+            ),
+            "sqli_probe": ToolSpec(
+                name="sqli_probe",
+                description="Structured SQL injection probing with bounded payload set.",
+                input_model=SqliProbeInput,
+                risk_level=get_policy("sqli_probe").risk_level,
+                approval_required=get_policy("sqli_probe").approval_required,
+                allowed_stages=("exploit",),
+                handler=sqli_probe.execute,
+            ),
+            "default_creds": ToolSpec(
+                name="default_creds",
+                description="Default credential check against known service account lists.",
+                input_model=DefaultCredsInput,
+                risk_level=get_policy("default_creds").risk_level,
+                approval_required=get_policy("default_creds").approval_required,
+                allowed_stages=("exploit",),
+                handler=default_creds.execute,
+            ),
         }
 
     def execute(
@@ -190,6 +268,7 @@ class ToolExecutor:
         stage: str,
         tool_name: str,
         params: dict,
+        risk_tolerance: str | None = None,
     ) -> ToolExecutionResult:
         if tool_name not in self.registry:
             raise ToolExecutionError(f"Tool {tool_name} is not registered.")
@@ -197,6 +276,19 @@ class ToolExecutor:
         spec = self.registry[tool_name]
         if "*" not in spec.allowed_stages and stage not in spec.allowed_stages:
             raise ToolExecutionError(f"Tool {tool_name} is not allowed in stage {stage}.")
+
+        # Risk-policy gate: verify the tool is permitted under the current tolerance.
+        if risk_tolerance:
+            try:
+                tolerance = RiskTolerance(risk_tolerance)
+            except ValueError:
+                tolerance = RiskTolerance.MODERATE
+            policy = get_policy(tool_name, tolerance=tolerance)
+            if policy.approval_required:
+                raise ToolExecutionError(
+                    f"Tool {tool_name} requires approval under risk tolerance "
+                    f"{tolerance.value}."
+                )
 
         validated = spec.input_model.model_validate(params)
         targets = self._extract_targets(validated)

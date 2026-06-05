@@ -26,6 +26,10 @@ class TaskCreate(BaseModel):
     ports: str = "1-1024"
     max_steps: int = Field(default=8, ge=1, le=20)
     auto_run: bool = False
+    risk_tolerance: str = Field(
+        default="moderate",
+        pattern=r"^(strict|moderate|relaxed|none)$",
+    )
 
 
 class TaskTemplateDefaults(BaseModel):

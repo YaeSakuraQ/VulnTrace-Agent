@@ -121,7 +121,7 @@ class VulnerabilityVerifyInput(BaseModel):
     target: str
     port: int = Field(ge=1, le=65535)
     scheme: Literal["http", "https"] = "http"
-    profile: Literal["auto", "php_apache", "mini_httpd", "json_rpc", "generic_web"] = "auto"
+    profile: Literal["auto", "php_apache", "mini_httpd", "json_rpc", "generic_web", "generic_exploit"] = "auto"
     preferred_poc: Literal["auto", "dvwa_fi", "none"] = "auto"
     service_name: str = ""
     service_product: str = ""
@@ -131,3 +131,49 @@ class VulnerabilityVerifyInput(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     interesting_paths: list[str] = Field(default_factory=list, max_length=12)
     timeout: int = Field(default=120, ge=30, le=300)
+
+
+class SshVersionInput(BaseModel):
+    target: str = Field(..., description="SSH target host")
+    port: int = Field(default=22, ge=1, le=65535)
+    timeout: int = Field(default=15, ge=5, le=60)
+
+
+class FtpAnonInput(BaseModel):
+    target: str
+    port: int = Field(default=21, ge=1, le=65535)
+    timeout: int = Field(default=15, ge=5, le=60)
+
+
+class SmbEnumInput(BaseModel):
+    target: str
+    port: int = Field(default=445, ge=1, le=65535)
+    timeout: int = Field(default=15, ge=5, le=60)
+
+
+class RedisCheckInput(BaseModel):
+    target: str
+    port: int = Field(default=6379, ge=1, le=65535)
+    timeout: int = Field(default=15, ge=5, le=60)
+
+
+class MongoDBCheckInput(BaseModel):
+    target: str
+    port: int = Field(default=27017, ge=1, le=65535)
+    timeout: int = Field(default=15, ge=5, le=60)
+
+
+class SqliProbeInput(BaseModel):
+    target: str
+    port: int = Field(ge=1, le=65535)
+    scheme: Literal["http", "https"] = "http"
+    path: str = "/"
+    param: str = Field(..., description="Query parameter name to inject")
+    timeout: int = Field(default=15, ge=5, le=120)
+
+
+class DefaultCredsInput(BaseModel):
+    target: str
+    port: int = Field(ge=1, le=65535)
+    scheme: Literal["http", "https"] = "http"
+    timeout: int = Field(default=30, ge=10, le=120)

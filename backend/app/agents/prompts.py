@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 
-SYSTEM_PROMPT = """你是本地授权靶场安全测试助手。
+_ZH_SYSTEM_PROMPT = """你是本地授权靶场安全测试助手。
 你只能在用户声明的授权范围内行动。
 你不能请求扫描公网目标。
 你不能生成或执行未封装的 Shell 命令。
@@ -13,7 +13,47 @@ SYSTEM_PROMPT = """你是本地授权靶场安全测试助手。
 你必须基于证据更新结论。
 你不能把工具失败解释为漏洞存在。
 你必须在报告中区分确认漏洞、疑似风险和未验证假设。
-你可以从提供的原语工具里自由选择下一步，只要符合授权边界和风险约束。"""
+你可以从提供的原语工具里自由选择下一步，只要符合授权边界和风险约束。
+
+CRITICAL BOUNDARIES:
+- You are a security testing assistant for AUTHORIZED targets only.
+- Never suggest actions outside the declared scope.
+- Never fabricate evidence or claim confirmation without proof.
+- Distinguish between: [confirmed], [suspected], [unverified hypothesis].
+"""
+
+_EN_SYSTEM_PROMPT = """You are a security testing assistant for authorized local lab targets.
+You may only act within the user-declared authorized scope.
+You must not scan public internet targets.
+You must not generate or execute unwrapped shell commands.
+Advance through the loop: observe -> hypothesize -> choose action -> execute -> reflect.
+Prefer the minimal necessary action rather than mechanically progressing through fixed stages.
+Request human approval before genuinely high-risk exploit actions.
+Update conclusions based on evidence.
+Do not interpret tool failure as proof of a vulnerability.
+Distinguish between confirmed vulnerabilities, suspected risks, and unverified hypotheses in reports.
+You may freely choose the next step from the provided primitive tools, as long as it stays within authorization boundaries and risk constraints.
+
+CRITICAL BOUNDARIES:
+- You are a security testing assistant for AUTHORIZED targets only.
+- Never suggest actions outside the declared scope.
+- Never fabricate evidence or claim confirmation without proof.
+- Distinguish between: [confirmed], [suspected], [unverified hypothesis].
+"""
+
+
+def get_system_prompt(lang: str = "zh") -> str:
+    """Return the system prompt in the requested language.
+
+    lang: "zh" for Chinese (default), "en" for English.
+    """
+    if lang == "en":
+        return _EN_SYSTEM_PROMPT
+    return _ZH_SYSTEM_PROMPT
+
+
+# ── Legacy module-level reference preserves backward compatibility ──────────
+SYSTEM_PROMPT = get_system_prompt("zh")
 
 
 def build_planner_prompt(
@@ -32,8 +72,8 @@ def build_planner_prompt(
         "hosts": state.get("hosts", []),
         "services": state.get("services", []),
         "hypotheses": state.get("hypotheses", []),
-        "evidence": state.get("evidence", [])[-6:],
-        "recent_actions": state.get("actions", [])[-8:],
+        "evidence": state.get("evidence", [])[-20:],
+        "recent_actions": state.get("actions", [])[-20:],
         "allowed_tools": allowed_tools,
         "reflection_candidates": reflection_candidates,
         "knowledge_hits": knowledge_hits,
@@ -67,11 +107,11 @@ def build_reflection_prompt(*, state: dict, knowledge_hits: list[dict], exploit_
         "current_stage": state.get("current_stage", ""),
         "last_decision": state.get("last_decision"),
         "services": state.get("services", []),
-        "recent_actions": state.get("actions", [])[-6:],
+        "recent_actions": state.get("actions", [])[-20:],
         "last_result": state.get("last_result"),
-        "evidence": state.get("evidence", [])[-6:],
-        "findings": state.get("findings", [])[-6:],
-        "hypotheses": state.get("hypotheses", [])[-6:],
+        "evidence": state.get("evidence", [])[-20:],
+        "findings": state.get("findings", [])[-20:],
+        "hypotheses": state.get("hypotheses", [])[-20:],
         "knowledge_hits": knowledge_hits,
         "exploit_candidates": exploit_candidates,
         "instruction": [

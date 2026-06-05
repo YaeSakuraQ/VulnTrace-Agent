@@ -9,7 +9,9 @@ from app.tools.vuln_verify import _send_raw_http_request, _split_http_response
 
 def execute(params: RawHttpInput, context: ToolContext) -> ToolExecutionResult:
     try:
-        response = _send_raw_http_request(params.target, params.port, params.request)
+        response = _send_raw_http_request(
+            params.target, params.port, params.request, timeout=params.timeout
+        )
     except OSError as exc:
         raise ToolExecutionError(f"Raw HTTP request failed: {exc}") from exc
 

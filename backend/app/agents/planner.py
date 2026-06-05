@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+logger = logging.getLogger(__name__)
+
 from app.agents.prompts import SYSTEM_PROMPT, build_planner_prompt, build_reflection_prompt
+from app.core.llm_provider import LLMProvider
 from app.core.risk_policy import get_policy
 from app.schemas.tool import (
     AssetDiscoveryInput,
@@ -23,7 +27,6 @@ from app.schemas.tool import (
 )
 from app.services.exploit_knowledge_mapper import ExploitKnowledgeMapper
 from app.services.knowledge_capture_service import KnowledgeCaptureService
-from app.services.deepseek_client import DeepSeekClient
 from app.services.knowledge_retriever import KnowledgeRetriever
 
 
@@ -73,10 +76,28 @@ class PlannerService:
         "vuln_verify": VulnerabilityVerifyInput,
     }
 
+    PORT_SERVICE_MAP: dict[int, tuple[str, str]] = {
+        21: ("ftp_anon", "Check FTP anonymous login"),
+        22: ("ssh_version", "Check SSH version and weak auth"),
+        25: ("smtp_check", "Check SMTP open relay"),
+        53: ("dns_check", "Check DNS zone transfer"),
+        445: ("smb_enum", "Enumerate SMB shares"),
+        1433: ("mssql_check", "Check MSSQL default credentials"),
+        1521: ("oracle_check", "Check Oracle listener"),
+        3306: ("mysql_check", "Check MySQL default credentials"),
+        3389: ("rdp_check", "Check RDP connectivity"),
+        5432: ("postgres_check", "Check PostgreSQL default credentials"),
+        5900: ("vnc_check", "Check VNC authentication"),
+        6379: ("redis_check", "Check Redis unauthorized access"),
+        8080: ("web_probe", "Probe web service on common alt port"),
+        8443: ("web_probe", "Probe HTTPS on common alt port"),
+        27017: ("mongodb_check", "Check MongoDB unauthorized access"),
+    }
+
     def __init__(
         self,
         *,
-        deepseek_client: DeepSeekClient,
+        deepseek_client: LLMProvider,
         exploit_mapper: ExploitKnowledgeMapper,
         knowledge_retriever: KnowledgeRetriever,
         knowledge_capture_service: KnowledgeCaptureService | None = None,
@@ -118,8 +139,8 @@ class PlannerService:
                 validated = self._hydrate_plan_policy(self._validate_plan(llm_plan))
                 validated.source = "llm"
                 return validated
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error("LLM plan failed, falling back to heuristic: %s", exc, exc_info=True)
 
         return self._hydrate_plan_policy(heuristic_plan)
 
@@ -147,8 +168,8 @@ class PlannerService:
                 )
                 reflected.source = "llm"
                 return reflected
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error("LLM reflect failed, falling back to heuristic: %s", exc, exc_info=True)
         heuristic.next_candidates = self._prioritize_candidates(exploit_candidates)[:3]
         heuristic.source = "heuristic"
         return heuristic
@@ -188,64 +209,98 @@ class PlannerService:
             )
         return specs
 
+    # ── heuristic plan dispatcher ──────────────────────────────────────────
+
     def _heuristic_plan(self, state: dict[str, Any]) -> PlanDecision:
+        """Cascade through stage-specific handlers, returning the first
+        non-None PlanDecision.  Each sub-method returns None when its stage
+        has nothing left to do and the dispatcher should try the next one."""
+
         approved_action = state.get("approved_action")
         if approved_action:
-            tool_name = approved_action["tool_name"]
-            policy = get_policy(tool_name)
-            return PlanDecision(
-                stage=state.get("current_stage", "exploit"),
-                tool_name=tool_name,
-                params=approved_action.get("params", {}),
-                rationale="Resume the user-approved high-risk action.",
-                expected_evidence=["Verification output and supporting evidence"],
-                risk_level=policy.risk_level,
-                requires_approval=False,
-                source="approved_action",
-                families=list(approved_action.get("families", [])),
-                family_details=list(approved_action.get("family_details", [])),
-                selected_family=approved_action.get("selected_family"),
-            )
+            return self._plan_from_approved_action(state, approved_action)
 
+        result = self._heuristic_plan_asset_discovery(state)
+        if result is not None:
+            return result
+
+        result = self._heuristic_plan_service_fingerprint(state)
+        if result is not None:
+            return result
+
+        result = self._heuristic_plan_web_recon(state)
+        if result is not None:
+            return result
+
+        result = self._heuristic_plan_exploit(state)
+        if result is not None:
+            return result
+
+        return self._heuristic_plan_finalize(state)
+
+    # ── stage-specific heuristic helpers ────────────────────────────────────
+
+    def _plan_from_approved_action(
+        self, state: dict[str, Any], approved_action: dict[str, Any]
+    ) -> PlanDecision:
+        tool_name = approved_action["tool_name"]
+        policy = get_policy(tool_name)
+        return PlanDecision(
+            stage=state.get("current_stage", "exploit"),
+            tool_name=tool_name,
+            params=approved_action.get("params", {}),
+            rationale="Resume the user-approved high-risk action.",
+            expected_evidence=["Verification output and supporting evidence"],
+            risk_level=policy.risk_level,
+            requires_approval=False,
+            source="approved_action",
+            families=list(approved_action.get("families", [])),
+            family_details=list(approved_action.get("family_details", [])),
+            selected_family=approved_action.get("selected_family"),
+        )
+
+    def _heuristic_plan_asset_discovery(
+        self, state: dict[str, Any]
+    ) -> PlanDecision | None:
+        hosts = state.get("hosts", [])
+        actions = state.get("actions", [])
+
+        if hosts:
+            return None  # hosts already discovered, move to next stage
+
+        if any(action.get("tool_name") == "asset_discovery" for action in actions):
+            return PlanDecision(
+                stage="generate_report",
+                rationale="Host discovery already ran and did not reveal live hosts.",
+                expected_evidence=["Final report"],
+                stop=True,
+                stop_reason="No live hosts were discovered inside the approved scope.",
+            )
+        return PlanDecision(
+            stage="observe",
+            tool_name="asset_discovery",
+            params={"targets": state.get("scope", [])},
+            rationale="Start with low-risk host discovery inside the approved scope.",
+            expected_evidence=["List of live hosts"],
+            risk_level="low",
+        )
+
+    def _heuristic_plan_service_fingerprint(
+        self, state: dict[str, Any]
+    ) -> PlanDecision | None:
         hosts = state.get("hosts", [])
         services = state.get("services", [])
-        evidence = state.get("evidence", [])
         actions = state.get("actions", [])
-        reflection_candidates = self._normalized_reflection_candidates(state)
-        learning_candidates = (
-            [
-                item.model_dump() if hasattr(item, "model_dump") else item
-                for item in self.knowledge_capture_service.suggest(state)
-            ]
-            if self.knowledge_capture_service
-            else []
-        )
-        exploit_candidates = self.exploit_mapper.suggest(state)
-
-        if not hosts:
-            if any(action.get("tool_name") == "asset_discovery" for action in actions):
-                return PlanDecision(
-                    stage="generate_report",
-                    rationale="Host discovery already ran and did not reveal live hosts.",
-                    expected_evidence=["Final report"],
-                    stop=True,
-                    stop_reason="No live hosts were discovered inside the approved scope.",
-                )
-            return PlanDecision(
-                stage="observe",
-                tool_name="asset_discovery",
-                params={"targets": state.get("scope", [])},
-                rationale="Start with low-risk host discovery inside the approved scope.",
-                expected_evidence=["List of live hosts"],
-                risk_level="low",
-            )
 
         fingerprinted_targets = {service["target"] for service in services} | {
             action.get("params", {}).get("target")
             for action in actions
             if action.get("tool_name") == "service_fingerprint"
         }
-        next_host = next((host["address"] for host in hosts if host["address"] not in fingerprinted_targets), None)
+        next_host = next(
+            (host["address"] for host in hosts if host["address"] not in fingerprinted_targets),
+            None,
+        )
         if next_host:
             return PlanDecision(
                 stage="observe",
@@ -255,54 +310,16 @@ class PlannerService:
                 expected_evidence=["Open ports and service banners"],
                 risk_level="low",
             )
+        return None
+
+    def _heuristic_plan_web_recon(self, state: dict[str, Any]) -> PlanDecision | None:
+        services = state.get("services", [])
+        evidence = state.get("evidence", [])
+        actions = state.get("actions", [])
 
         web_services = [service for service in services if self._is_web_service(service)]
-        if reflection_candidates:
-            candidate = reflection_candidates[0]
-            return PlanDecision(
-                stage=str(candidate.get("stage", "exploit")),
-                tool_name=str(candidate.get("tool_name")),
-                params=dict(candidate.get("params", {})),
-                rationale=str(candidate.get("rationale", "Reflection identified a refined next exploit action.")),
-                expected_evidence=[str(item) for item in candidate.get("expected_evidence", [])],
-                risk_level=str(candidate.get("risk_level", "high")),
-                requires_approval=bool(candidate.get("requires_approval", True)),
-                source=str(candidate.get("source", "reflection")),
-                families=list(candidate.get("families", [])),
-                family_details=list(candidate.get("family_details", [])),
-                selected_family=candidate.get("selected_family"),
-            )
-        if learning_candidates:
-            candidate = learning_candidates[0]
-            return PlanDecision(
-                stage=str(candidate.get("stage", "exploit")),
-                tool_name=str(candidate.get("tool_name")),
-                params=dict(candidate.get("params", {})),
-                rationale=str(candidate.get("rationale", "Reviewed learning candidate selected.")),
-                expected_evidence=[str(item) for item in candidate.get("expected_evidence", [])],
-                risk_level=str(candidate.get("risk_level", "medium")),
-                requires_approval=bool(candidate.get("requires_approval", False)),
-                source=str(candidate.get("source", "learning")),
-                families=list(candidate.get("families", [])),
-                family_details=list(candidate.get("family_details", [])),
-                selected_family=candidate.get("selected_family"),
-            )
-        if exploit_candidates:
-            candidate = exploit_candidates[0]
-            return PlanDecision(
-                stage="exploit",
-                tool_name=candidate.tool_name,
-                params=candidate.params,
-                rationale=candidate.rationale,
-                expected_evidence=candidate.expected_evidence,
-                risk_level=candidate.risk_level,
-                requires_approval=candidate.requires_approval,
-                source="mapper",
-                families=list(candidate.families),
-                family_details=list(candidate.family_details),
-                selected_family=candidate.selected_family,
-            )
 
+        # ── HTTP GET baseline probe ─────────────────────────────────────────
         probed_endpoints = {
             (item.get("target"), item.get("port"))
             for item in evidence
@@ -340,10 +357,12 @@ class PlannerService:
                 risk_level="low",
             )
 
+        # ── Safe RPC probe ──────────────────────────────────────────────────
         safe_rpc_probe = self._build_safe_rpc_probe_plan(state, web_services)
         if safe_rpc_probe is not None:
             return safe_rpc_probe
 
+        # ── Directory enumeration ───────────────────────────────────────────
         enumerated_endpoints = {
             (item.get("target"), item.get("port"))
             for item in evidence
@@ -381,6 +400,7 @@ class PlannerService:
                 risk_level="medium",
             )
 
+        # ── FFUF enumeration ────────────────────────────────────────────────
         ffuf_targets = {
             (item.get("target"), item.get("port"))
             for item in evidence
@@ -431,6 +451,7 @@ class PlannerService:
                 risk_level="medium",
             )
 
+        # ── HTTP snapshot ───────────────────────────────────────────────────
         snapshotted_targets = {
             (item.get("target"), item.get("port"))
             for item in evidence
@@ -468,6 +489,7 @@ class PlannerService:
                 risk_level="low",
             )
 
+        # ── Template scanner ────────────────────────────────────────────────
         template_scanned_targets = {
             (
                 action.get("tool_name"),
@@ -510,6 +532,75 @@ class PlannerService:
                 risk_level="medium",
             )
 
+        return None  # nothing more to do in web recon, fall through to exploit
+
+    def _heuristic_plan_exploit(self, state: dict[str, Any]) -> PlanDecision | None:
+        services = state.get("services", [])
+
+        reflection_candidates = self._normalized_reflection_candidates(state)
+        learning_candidates = (
+            [
+                item.model_dump() if hasattr(item, "model_dump") else item
+                for item in self.knowledge_capture_service.suggest(state)
+            ]
+            if self.knowledge_capture_service
+            else []
+        )
+        exploit_candidates = self.exploit_mapper.suggest(state)
+
+        # ── Reflection candidates take highest priority ──────────────────────
+        if reflection_candidates:
+            candidate = reflection_candidates[0]
+            return PlanDecision(
+                stage=str(candidate.get("stage", "exploit")),
+                tool_name=str(candidate.get("tool_name")),
+                params=dict(candidate.get("params", {})),
+                rationale=str(candidate.get("rationale", "Reflection identified a refined next exploit action.")),
+                expected_evidence=[str(item) for item in candidate.get("expected_evidence", [])],
+                risk_level=str(candidate.get("risk_level", "high")),
+                requires_approval=bool(candidate.get("requires_approval", True)),
+                source=str(candidate.get("source", "reflection")),
+                families=list(candidate.get("families", [])),
+                family_details=list(candidate.get("family_details", [])),
+                selected_family=candidate.get("selected_family"),
+            )
+
+        # ── Learning candidates ─────────────────────────────────────────────
+        if learning_candidates:
+            candidate = learning_candidates[0]
+            return PlanDecision(
+                stage=str(candidate.get("stage", "exploit")),
+                tool_name=str(candidate.get("tool_name")),
+                params=dict(candidate.get("params", {})),
+                rationale=str(candidate.get("rationale", "Reviewed learning candidate selected.")),
+                expected_evidence=[str(item) for item in candidate.get("expected_evidence", [])],
+                risk_level=str(candidate.get("risk_level", "medium")),
+                requires_approval=bool(candidate.get("requires_approval", False)),
+                source=str(candidate.get("source", "learning")),
+                families=list(candidate.get("families", [])),
+                family_details=list(candidate.get("family_details", [])),
+                selected_family=candidate.get("selected_family"),
+            )
+
+        # ── Exploit mapper candidates ───────────────────────────────────────
+        if exploit_candidates:
+            candidate = exploit_candidates[0]
+            return PlanDecision(
+                stage="exploit",
+                tool_name=candidate.tool_name,
+                params=candidate.params,
+                rationale=candidate.rationale,
+                expected_evidence=candidate.expected_evidence,
+                risk_level=candidate.risk_level,
+                requires_approval=candidate.requires_approval,
+                source="mapper",
+                families=list(candidate.families),
+                family_details=list(candidate.family_details),
+                selected_family=candidate.selected_family,
+            )
+
+        # ── Vulnerability verification ──────────────────────────────────────
+        web_services = [service for service in services if self._is_web_service(service)]
         next_verify_target = next(
             (
                 service
@@ -538,6 +629,13 @@ class PlannerService:
                 requires_approval=True,
             )
 
+        return None
+
+    def _heuristic_plan_finalize(self, state: dict[str, Any]) -> PlanDecision:
+        services = state.get("services", [])
+        actions = state.get("actions", [])
+        web_services = [service for service in services if self._is_web_service(service)]
+
         if web_services and not any(
             action.get("tool_name") in {"header_mutation", "raw_http", "tcp_send", "vuln_verify", "http_request"}
             for action in actions
@@ -557,6 +655,8 @@ class PlannerService:
             stop=True,
             stop_reason="No further safe actions are pending.",
         )
+
+    # ── reflection helpers ──────────────────────────────────────────────────
 
     def _heuristic_reflection(self, state: dict[str, Any]) -> ReflectionDecision:
         last_result = state.get("last_result") or {}
@@ -813,6 +913,10 @@ class PlannerService:
             else:
                 plan.risk_level = "medium"
                 plan.requires_approval = False
+        logger.info(
+            "Plan decision: tool=%s stage=%s risk=%s approval=%s",
+            plan.tool_name, plan.stage, plan.risk_level, plan.requires_approval,
+        )
         return plan
 
     def _normalize_candidate_tool(self, tool_name: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -895,7 +999,6 @@ class PlannerService:
             "allow_redirects": method != "POST",
             "timeout": params.get("timeout", 15),
         }
-
 
     def _is_web_service(self, service: dict[str, Any]) -> bool:
         name = str(service.get("service", "")).lower()
