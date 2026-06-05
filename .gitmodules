@@ -1,0 +1,6 @@
+[submodule "labs/DVWA"]
+	path = labs/DVWA
+	url = https://github.com/digininja/DVWA.git
+[submodule "labs/vulhub"]
+	path = labs/vulhub
+	url = https://github.com/vulhub/vulhub.git
