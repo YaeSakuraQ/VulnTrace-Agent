@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -332,6 +333,17 @@ class PentestGraphRunner:
         from app.schemas.tool import ToolExecutionResult
 
         parsed = ToolExecutionResult.model_validate(last_result)
+
+        # ── searchsploit auto-knowledge-capture ────────────────────────────
+        # When searchsploit returns new exploits for an unknown service,
+        # auto-generate learning candidates for user review.
+        if (
+            parsed.tool_name == "searchsploit_lookup"
+            and parsed.success
+            and self.knowledge_capture_service
+        ):
+            self._capture_searchsploit_results(state, parsed)
+
         self.result_parser.apply(state, parsed)
         self._persist_state(
             state,
@@ -340,6 +352,46 @@ class PentestGraphRunner:
             event_type="result_parsed",
         )
         return state
+
+    def _capture_searchsploit_results(
+        self, state: AgentState, parsed: "ToolExecutionResult"
+    ) -> None:
+        """Feed searchsploit results into the knowledge capture pipeline."""
+        try:
+            results = parsed.structured_data.get("results", [])
+            if not results:
+                return
+
+            services = state.get("services", [])
+            if not services:
+                return
+
+            for service in services:
+                # Only capture for unmatched services
+                if self.planner.exploit_mapper.has_candidates_for_service(service):
+                    continue
+
+                capture_result = self.knowledge_capture_service.capture_from_searchsploit(
+                    task_id=state["task_id"],
+                    device=service,
+                    searchsploit_results=results,
+                    auto_publish=False,  # user reviews first for safety
+                )
+
+                if capture_result.get("proposed", 0) > 0:
+                    self.task_service.add_event(
+                        state["task_id"],
+                        event_type="knowledge_expansion_proposed",
+                        stage=state.get("current_stage", "enumerate"),
+                        message=(
+                            f"searchsploit found {len(results)} results for "
+                            f"{service.get('product', service.get('service', 'unknown'))}. "
+                            f"{capture_result['proposed']} new exploit signature(s) proposed for review."
+                        ),
+                        payload=capture_result,
+                    )
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Failed to capture searchsploit results: %s", exc)
 
     def _reflect_result(self, state: AgentState) -> AgentState:
         reflection = self.planner.reflect(state)

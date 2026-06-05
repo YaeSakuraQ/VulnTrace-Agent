@@ -391,7 +391,71 @@ class PlannerService:
                 selected_family=candidate.selected_family,
             )
 
+        # ── Fallback: searchsploit for unmatched services ──────────────────
+        # When no exploit candidate matches a service, query Exploit-DB
+        # via searchsploit_lookup to discover new exploits dynamically.
+        searchsploit_plan = self._build_searchsploit_plan(state)
+        if searchsploit_plan:
+            return searchsploit_plan
+
         return None  # no candidates, fall through to web recon
+
+    def _build_searchsploit_plan(self, state: dict[str, Any]) -> PlanDecision | None:
+        """Trigger a searchsploit lookup for the first service that hasn't been
+        queried yet and doesn't match any existing exploit signature."""
+        services = state.get("services", [])
+        if not services:
+            return None
+
+        # Track which services have already been searchsploit-ed in this task
+        # to avoid repeated queries for the same service
+        already_queried = set()
+        for action in state.get("actions", []):
+            if action.get("tool_name") != "searchsploit_lookup":
+                continue
+            params = action.get("params", {})
+            q = str(params.get("query", ""))
+            if q:
+                already_queried.add(q.lower())
+
+        for service in services:
+            # Skip if we already have candidates for this service
+            if self.exploit_mapper.has_candidates_for_service(service):
+                continue
+
+            query = self.exploit_mapper.get_searchsploit_query(service)
+            if not query or query.lower() in already_queried:
+                continue
+
+            logger.info(
+                "No exploit signatures matched service %s:%s (%s). "
+                "Triggering searchsploit with query: %s",
+                service.get("target"), service.get("port"),
+                service.get("product", service.get("service", "unknown")),
+                query,
+            )
+
+            return PlanDecision(
+                stage="enumerate",
+                tool_name="searchsploit_lookup",
+                params={"query": query, "timeout": 60},
+                rationale=(
+                    f"No existing exploit signature matched service "
+                    f"{service.get('product', '') or service.get('service', '')} "
+                    f"on port {service.get('port')}. "
+                    f"Searching Exploit-DB for '{query}' to discover relevant exploits "
+                    f"and auto-expand the knowledge base."
+                ),
+                expected_evidence=[
+                    f"Exploit-DB search results for '{query}'",
+                    "New exploit signatures proposed for review",
+                ],
+                risk_level="low",
+                requires_approval=False,
+                source="heuristic",
+            )
+
+        return None
 
     def _heuristic_plan_web_recon(self, state: dict[str, Any]) -> PlanDecision | None:
         """Web reconnaissance: HTTP GET, RPC probes, dir/ffuf enumeration,

@@ -17,6 +17,7 @@ from app.schemas.learning_candidate import (
 )
 from app.schemas.task import ArtifactRecord, TaskDetail, TaskEvent
 from app.services.exploit_knowledge_mapper import ExploitCandidate
+from app.services.knowledge_auto_expansion import KnowledgeAutoExpansion, ProposedSignature
 
 
 def utc_now() -> datetime:
@@ -102,6 +103,89 @@ class KnowledgeCaptureService:
                 continue
             created.append(self._insert_candidate(task.id, payload))
         return created
+
+    def capture_from_searchsploit(
+        self,
+        task_id: str,
+        device: dict[str, Any],
+        searchsploit_results: list[dict[str, Any]],
+        *,
+        auto_publish: bool = False,
+    ) -> dict[str, Any]:
+        """Generate learning candidates from searchsploit / Exploit-DB results.
+
+        Flow:
+        1. Convert raw results → ProposedSignature objects (deduped)
+        2. For each proposal, create a learning candidate for review
+        3. If auto_publish is enabled and risk is low, auto-approve and publish
+
+        Returns a status dict with counts and IDs.
+        """
+        expander = KnowledgeAutoExpansion(llm_provider=self.llm)
+
+        # Limit to top 10 results to avoid flooding the review queue
+        proposals = expander.searchsploit_to_proposals(device, searchsploit_results[:10], max_proposals=5)
+        if not proposals:
+            return {"proposed": 0, "published": [], "review_needed": []}
+
+        fingerprint_key = f"searchsploit:{task_id}:{device.get('target', '')}:{device.get('port', 0)}"
+        published: list[str] = []
+        review_needed: list[str] = []
+
+        for proposal in proposals:
+            if self._fingerprint_exists(task_id, fingerprint_key + ":" + proposal.id):
+                continue
+
+            sig_dict = proposal.model_dump(exclude_none=True)
+            source_edb = sig_dict.pop("source_edb_id", "")
+            source_query = sig_dict.pop("source_query", "")
+            rationale = sig_dict.pop("rationale", "")
+
+            # Build a learning candidate
+            suggested_action = proposal.candidates[0] if proposal.candidates else {}
+            verification_recipe: dict[str, Any] = {
+                "kind": "searchsploit_proposal",
+                "source_edb_id": source_edb,
+                "source_query": source_query,
+                "matcher": proposal.matcher,
+                "family": proposal.family,
+            }
+
+            payload: dict[str, Any] = {
+                "title": f"[Exploit-DB {source_edb}] {proposal.id}",
+                "summary": f"Auto-proposed from searchsploit result. {rationale}",
+                "fingerprint_key": f"{fingerprint_key}:{proposal.id}",
+                "signature": sig_dict,
+                "suggested_action": suggested_action,
+                "verification_recipe": verification_recipe,
+                "source": "searchsploit",
+            }
+
+            if self._fingerprint_exists(task_id, payload["fingerprint_key"]):
+                continue
+
+            candidate = self._insert_candidate(task_id, payload)
+
+            # Auto-publish low-risk signatures
+            risk_level = suggested_action.get("risk_level", "medium")
+            if auto_publish and risk_level not in {"high", "critical"}:
+                self.approve(
+                    candidate.id,
+                    LearningCandidateDecision(
+                        note=f"Auto-approved searchsploit-derived signature from EDB {source_edb}",
+                    ),
+                )
+                expander.approve_and_publish(proposal)
+                published.append(proposal.id)
+            else:
+                review_needed.append(proposal.id)
+
+        return {
+            "proposed": len(proposals),
+            "published": published,
+            "review_needed": review_needed,
+            "candidate_ids": [p.id for p in proposals],
+        }
 
     def list_candidates(
         self,
