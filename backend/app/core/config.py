@@ -6,6 +6,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+SQLITE_URL_PREFIX = "sqlite:///"
+
+
+def _resolve_project_path(value: str) -> Path:
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return PROJECT_ROOT / candidate
 
 
 class Settings(BaseSettings):
@@ -38,13 +46,13 @@ class Settings(BaseSettings):
 
     @property
     def database_path(self) -> Path:
-        if not self.database_url.startswith("sqlite:///"):
+        if not self.database_url.startswith(SQLITE_URL_PREFIX):
             raise ValueError("Only sqlite:/// DATABASE_URL is supported in this project.")
-        return Path(self.database_url.replace("sqlite:///", "", 1))
+        return _resolve_project_path(self.database_url.replace(SQLITE_URL_PREFIX, "", 1))
 
     @property
     def artifact_path(self) -> Path:
-        return Path(self.artifact_dir)
+        return _resolve_project_path(self.artifact_dir)
 
 
 @lru_cache(maxsize=1)
