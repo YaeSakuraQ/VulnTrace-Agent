@@ -212,9 +212,15 @@ class PlannerService:
     # ── heuristic plan dispatcher ──────────────────────────────────────────
 
     def _heuristic_plan(self, state: dict[str, Any]) -> PlanDecision:
-        """Cascade through stage-specific handlers, returning the first
-        non-None PlanDecision.  Each sub-method returns None when its stage
-        has nothing left to do and the dispatcher should try the next one."""
+        """Cascade through stage-specific handlers.
+
+        Order: approved_action > asset_discovery > service_fingerprint >
+        exploit (candidates) > web_recon (includes vuln_verify) > finalize.
+
+        Candidates are checked before web reconnaissance so that reflection,
+        learning, and exploit mapper proposals can jump ahead of generic
+        probing when the evidence is already sufficient.
+        """
 
         approved_action = state.get("approved_action")
         if approved_action:
@@ -228,11 +234,14 @@ class PlannerService:
         if result is not None:
             return result
 
-        result = self._heuristic_plan_web_recon(state)
+        # Candidates (reflection / learning / exploit mapper) take priority
+        # over web recon.  vuln_verify lives in web_recon because it requires
+        # reconnaissance evidence.
+        result = self._heuristic_plan_exploit(state)
         if result is not None:
             return result
 
-        result = self._heuristic_plan_exploit(state)
+        result = self._heuristic_plan_web_recon(state)
         if result is not None:
             return result
 
@@ -312,7 +321,85 @@ class PlannerService:
             )
         return None
 
+    def _heuristic_plan_exploit(self, state: dict[str, Any]) -> PlanDecision | None:
+        """Check reflection, learning, and exploit mapper candidates.
+
+        This method does NOT include vuln_verify -- that is handled by
+        _heuristic_plan_web_recon since it requires reconnaissance evidence
+        that must be collected first.
+        """
+
+        reflection_candidates = self._normalized_reflection_candidates(state)
+        learning_candidates = (
+            [
+                item.model_dump() if hasattr(item, "model_dump") else item
+                for item in self.knowledge_capture_service.suggest(state)
+            ]
+            if self.knowledge_capture_service
+            else []
+        )
+        exploit_candidates = self.exploit_mapper.suggest(state)
+
+        # ── Reflection candidates take highest priority ──────────────────────
+        if reflection_candidates:
+            candidate = reflection_candidates[0]
+            return PlanDecision(
+                stage=str(candidate.get("stage", "exploit")),
+                tool_name=str(candidate.get("tool_name")),
+                params=dict(candidate.get("params", {})),
+                rationale=str(candidate.get("rationale", "Reflection identified a refined next exploit action.")),
+                expected_evidence=[str(item) for item in candidate.get("expected_evidence", [])],
+                risk_level=str(candidate.get("risk_level", "high")),
+                requires_approval=bool(candidate.get("requires_approval", True)),
+                source=str(candidate.get("source", "reflection")),
+                families=list(candidate.get("families", [])),
+                family_details=list(candidate.get("family_details", [])),
+                selected_family=candidate.get("selected_family"),
+            )
+
+        # ── Learning candidates ─────────────────────────────────────────────
+        if learning_candidates:
+            candidate = learning_candidates[0]
+            return PlanDecision(
+                stage=str(candidate.get("stage", "exploit")),
+                tool_name=str(candidate.get("tool_name")),
+                params=dict(candidate.get("params", {})),
+                rationale=str(candidate.get("rationale", "Reviewed learning candidate selected.")),
+                expected_evidence=[str(item) for item in candidate.get("expected_evidence", [])],
+                risk_level=str(candidate.get("risk_level", "medium")),
+                requires_approval=bool(candidate.get("requires_approval", False)),
+                source=str(candidate.get("source", "learning")),
+                families=list(candidate.get("families", [])),
+                family_details=list(candidate.get("family_details", [])),
+                selected_family=candidate.get("selected_family"),
+            )
+
+        # ── Exploit mapper candidates ───────────────────────────────────────
+        if exploit_candidates:
+            candidate = exploit_candidates[0]
+            return PlanDecision(
+                stage="exploit",
+                tool_name=candidate.tool_name,
+                params=candidate.params,
+                rationale=candidate.rationale,
+                expected_evidence=candidate.expected_evidence,
+                risk_level=candidate.risk_level,
+                requires_approval=candidate.requires_approval,
+                source="mapper",
+                families=list(candidate.families),
+                family_details=list(candidate.family_details),
+                selected_family=candidate.selected_family,
+            )
+
+        return None  # no candidates, fall through to web recon
+
     def _heuristic_plan_web_recon(self, state: dict[str, Any]) -> PlanDecision | None:
+        """Web reconnaissance: HTTP GET, RPC probes, dir/ffuf enumeration,
+        snapshots, template scanning, and vulnerability verification.
+
+        vuln_verify lives here (not in _heuristic_plan_exploit) because it
+        requires the reconnaissance evidence collected by the earlier steps.
+        """
         services = state.get("services", [])
         evidence = state.get("evidence", [])
         actions = state.get("actions", [])
@@ -532,75 +619,7 @@ class PlannerService:
                 risk_level="medium",
             )
 
-        return None  # nothing more to do in web recon, fall through to exploit
-
-    def _heuristic_plan_exploit(self, state: dict[str, Any]) -> PlanDecision | None:
-        services = state.get("services", [])
-
-        reflection_candidates = self._normalized_reflection_candidates(state)
-        learning_candidates = (
-            [
-                item.model_dump() if hasattr(item, "model_dump") else item
-                for item in self.knowledge_capture_service.suggest(state)
-            ]
-            if self.knowledge_capture_service
-            else []
-        )
-        exploit_candidates = self.exploit_mapper.suggest(state)
-
-        # ── Reflection candidates take highest priority ──────────────────────
-        if reflection_candidates:
-            candidate = reflection_candidates[0]
-            return PlanDecision(
-                stage=str(candidate.get("stage", "exploit")),
-                tool_name=str(candidate.get("tool_name")),
-                params=dict(candidate.get("params", {})),
-                rationale=str(candidate.get("rationale", "Reflection identified a refined next exploit action.")),
-                expected_evidence=[str(item) for item in candidate.get("expected_evidence", [])],
-                risk_level=str(candidate.get("risk_level", "high")),
-                requires_approval=bool(candidate.get("requires_approval", True)),
-                source=str(candidate.get("source", "reflection")),
-                families=list(candidate.get("families", [])),
-                family_details=list(candidate.get("family_details", [])),
-                selected_family=candidate.get("selected_family"),
-            )
-
-        # ── Learning candidates ─────────────────────────────────────────────
-        if learning_candidates:
-            candidate = learning_candidates[0]
-            return PlanDecision(
-                stage=str(candidate.get("stage", "exploit")),
-                tool_name=str(candidate.get("tool_name")),
-                params=dict(candidate.get("params", {})),
-                rationale=str(candidate.get("rationale", "Reviewed learning candidate selected.")),
-                expected_evidence=[str(item) for item in candidate.get("expected_evidence", [])],
-                risk_level=str(candidate.get("risk_level", "medium")),
-                requires_approval=bool(candidate.get("requires_approval", False)),
-                source=str(candidate.get("source", "learning")),
-                families=list(candidate.get("families", [])),
-                family_details=list(candidate.get("family_details", [])),
-                selected_family=candidate.get("selected_family"),
-            )
-
-        # ── Exploit mapper candidates ───────────────────────────────────────
-        if exploit_candidates:
-            candidate = exploit_candidates[0]
-            return PlanDecision(
-                stage="exploit",
-                tool_name=candidate.tool_name,
-                params=candidate.params,
-                rationale=candidate.rationale,
-                expected_evidence=candidate.expected_evidence,
-                risk_level=candidate.risk_level,
-                requires_approval=candidate.requires_approval,
-                source="mapper",
-                families=list(candidate.families),
-                family_details=list(candidate.family_details),
-                selected_family=candidate.selected_family,
-            )
-
-        # ── Vulnerability verification ──────────────────────────────────────
-        web_services = [service for service in services if self._is_web_service(service)]
+        # ── Vulnerability verification (runs after recon has evidence) ──────
         next_verify_target = next(
             (
                 service
@@ -629,7 +648,7 @@ class PlannerService:
                 requires_approval=True,
             )
 
-        return None
+        return None  # nothing more to do in web recon, fall through to finalize
 
     def _heuristic_plan_finalize(self, state: dict[str, Any]) -> PlanDecision:
         services = state.get("services", [])
