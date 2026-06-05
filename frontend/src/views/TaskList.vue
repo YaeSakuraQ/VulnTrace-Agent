@@ -84,8 +84,6 @@
       </div>
       <n-empty v-else description="No tasks yet. Create one to get started." />
 
-      <!-- API Balance Panel -->
-      <ApiBalancePanel />
     </section>
   </div>
 </template>
@@ -97,7 +95,6 @@ import { NAlert, NButton, NEmpty, NInput, NTag } from 'naive-ui'
 import { RefreshCw, Search } from '@lucide/vue'
 
 import TaskForm from '../components/TaskForm.vue'
-import ApiBalancePanel from '../components/ApiBalancePanel.vue'
 import { createTask, fetchTaskTemplates, fetchTasks } from '../api/tasks'
 import { prettifyStage, prettifyStatus, statusTagType } from '../utils/ui'
 

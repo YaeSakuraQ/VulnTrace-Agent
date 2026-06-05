@@ -1,112 +1,74 @@
 <template>
   <div class="stack-xl">
+    <!-- Hero -->
     <section class="detail-hero">
       <div class="stack">
         <div class="hero-heading">
           <div>
             <p class="section-kicker">{{ prettifyStage(workspace.task?.current_stage) }}</p>
-            <h2>{{ workspace.task?.name || '任务详情' }}</h2>
+            <h2>{{ workspace.task?.name || 'Task Detail' }}</h2>
           </div>
-          <n-tag
-            round
-            size="medium"
-            :bordered="false"
-            :type="statusTagType(workspace.task?.status)"
-          >
+          <n-tag round size="medium" :bordered="false" :type="statusTagType(workspace.task?.status)">
             {{ prettifyStatus(workspace.task?.status) }}
           </n-tag>
         </div>
         <p class="hero-copy detail-copy">
-          {{ workspace.task?.lab_description || '等待任务上下文。' }}
+          {{ workspace.task?.lab_description || 'Waiting for task context.' }}
         </p>
         <div class="hero-meta">
-          <span>范围 {{ (workspace.task?.scope || []).join(', ') || 'n/a' }}</span>
-          <span>端口 {{ workspace.task?.ports || 'n/a' }}</span>
-          <span>步骤 {{ workspace.task?.state?.step_count || 0 }} / {{ workspace.task?.state?.max_steps || 0 }}</span>
+          <span>Scope {{ (workspace.task?.scope || []).join(', ') || 'n/a' }}</span>
+          <span>Port {{ workspace.task?.ports || 'n/a' }}</span>
+          <span>Step {{ workspace.task?.state?.step_count || 0 }} / {{ workspace.task?.state?.max_steps || 0 }}</span>
         </div>
       </div>
-
       <div class="hero-actions">
-        <n-button type="primary" @click="handleRun">
-          <template #icon>
-            <Play :size="16" />
-          </template>
-          运行 / 继续
-        </n-button>
-        <n-button @click="handlePause">
-          <template #icon>
-            <Pause :size="16" />
-          </template>
-          暂停
-        </n-button>
-        <n-button type="error" ghost @click="handleStop">
-          <template #icon>
-            <Square :size="16" />
-          </template>
-          终止
-        </n-button>
+        <n-button type="primary" @click="handleRun"><template #icon><Play :size="16" /></template>Run</n-button>
+        <n-button @click="handlePause"><template #icon><Pause :size="16" /></template>Pause</n-button>
+        <n-button type="error" ghost @click="handleStop"><template #icon><Square :size="16" /></template>Stop</n-button>
       </div>
     </section>
 
+    <!-- Stats -->
     <div class="stats-grid">
-      <div class="metric-tile">
-        <span class="metric-label">待审批</span>
-        <strong>{{ pendingApprovals }}</strong>
-      </div>
-      <div class="metric-tile">
-        <span class="metric-label">确认发现</span>
-        <strong>{{ confirmedFindings }}</strong>
-      </div>
-      <div class="metric-tile">
-        <span class="metric-label">证据文件</span>
-        <strong>{{ workspace.artifacts.length }}</strong>
-      </div>
-      <div class="metric-tile">
-        <span class="metric-label">事件数</span>
-        <strong>{{ workspace.events.length }}</strong>
-      </div>
+      <div class="metric-tile"><span class="metric-label">Pending</span><strong>{{ pendingApprovals }}</strong></div>
+      <div class="metric-tile"><span class="metric-label">Confirmed</span><strong>{{ confirmedFindings }}</strong></div>
+      <div class="metric-tile"><span class="metric-label">Artifacts</span><strong>{{ workspace.artifacts.length }}</strong></div>
+      <div class="metric-tile"><span class="metric-label">Events</span><strong>{{ workspace.events.length }}</strong></div>
     </div>
 
-    <n-alert v-if="workspace.error" type="error" :show-icon="true">
-      {{ workspace.error }}
-    </n-alert>
+    <n-alert v-if="workspace.error" type="error" :show-icon="true">{{ workspace.error }}</n-alert>
 
+    <!-- Tabs -->
     <n-tabs v-model:value="activeTab" type="line" animated>
-      <n-tab-pane name="overview" tab="概览">
-        <div class="detail-grid">
-          <AgentConsole :task="workspace.task" />
-          <PathGraph :graph="workspace.task?.state?.path_graph" />
-        </div>
+      <n-tab-pane name="overview" tab="Overview">
+        <AgentConsole :task="workspace.task" />
+        <PathGraph :graph="workspace.task?.state?.path_graph" style="margin-top: 20px" />
       </n-tab-pane>
 
-      <n-tab-pane name="approvals" tab="审批">
+      <n-tab-pane name="approvals" tab="Approvals">
         <ApprovalPanel
           :approvals="workspace.approvals"
-          @approve="handleApprove"
-          @reject="handleReject"
-          @edit-approve="handleEditApprove"
+          @approve="handleApprove" @reject="handleReject" @edit-approve="handleEditApprove"
         />
       </n-tab-pane>
 
-      <n-tab-pane name="learning" tab="经验">
+      <n-tab-pane name="learning" tab="Learning">
         <LearningCandidatePanel
           :candidates="workspace.learningCandidates"
-          @approve="handleApproveLearningCandidate"
-          @reject="handleRejectLearningCandidate"
+          @approve="handleApproveLearningCandidate" @reject="handleRejectLearningCandidate"
         />
       </n-tab-pane>
 
-      <n-tab-pane name="timeline" tab="活动">
+      <n-tab-pane name="timeline" tab="Activity">
         <EventTimeline :events="workspace.events" />
       </n-tab-pane>
 
-      <n-tab-pane name="report" tab="报告">
-        <ReportView
-          :report="workspace.report"
-          :task="workspace.task"
-          :artifacts="workspace.artifacts"
-          :approvals="workspace.approvals"
-        />
+      <n-tab-pane name="report" tab="Report">
+        <ReportView :report="workspace.report" :task="workspace.task" :artifacts="workspace.artifacts" :approvals="workspace.approvals" />
+      </n-tab-pane>
+
+      <n-tab-pane name="usage" tab="Usage">
+        <ApiBalancePanel />
       </n-tab-pane>
     </n-tabs>
   </div>
@@ -117,8 +79,8 @@ import { computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { NAlert, NButton, NTabPane, NTabs, NTag } from 'naive-ui'
 import { Pause, Play, Square } from '@lucide/vue'
-
 import AgentConsole from '../components/AgentConsole.vue'
+import ApiBalancePanel from '../components/ApiBalancePanel.vue'
 import ApprovalPanel from '../components/ApprovalPanel.vue'
 import EventTimeline from '../components/EventTimeline.vue'
 import LearningCandidatePanel from '../components/LearningCandidatePanel.vue'
@@ -126,67 +88,43 @@ import PathGraph from '../components/PathGraph.vue'
 import ReportView from '../components/ReportView.vue'
 import { buildWsUrl } from '../api/client'
 import {
-  approveAction,
-  approveLearningCandidate,
-  editAndApproveAction,
-  fetchApprovals,
-  fetchArtifacts,
-  fetchEvents,
-  fetchLearningCandidates,
-  fetchReport,
-  fetchTask,
-  pauseTask,
-  rejectLearningCandidate,
-  rejectAction,
-  runTask,
-  stopTask,
+  approveAction, approveLearningCandidate, editAndApproveAction,
+  fetchApprovals, fetchArtifacts, fetchEvents, fetchLearningCandidates,
+  fetchReport, fetchTask, pauseTask, rejectAction, rejectLearningCandidate,
+  runTask, stopTask,
 } from '../api/tasks'
 import { createWorkspaceState } from '../store/useTaskStore'
-import {
-  countConfirmedFindings,
-  prettifyStage,
-  prettifyStatus,
-  statusTagType,
-} from '../utils/ui'
+import { countConfirmedFindings, prettifyStage, prettifyStatus, statusTagType } from '../utils/ui'
 
 const route = useRoute()
 const workspace = createWorkspaceState()
 const activeTab = computed({
   get: () => workspace.activeTab || 'overview',
-  set: (value) => {
-    workspace.activeTab = value
-  },
+  set: (v) => { workspace.activeTab = v },
 })
 let socket = null
+let debounceTimer = null
 
-const pendingApprovals = computed(
-  () => workspace.approvals.filter((item) => item.status === 'pending').length
-)
-const confirmedFindings = computed(() =>
-  countConfirmedFindings(workspace.task?.state?.findings || [])
-)
+const pendingApprovals = computed(() => workspace.approvals.filter(i => i.status === 'pending').length)
+const confirmedFindings = computed(() => countConfirmedFindings(workspace.task?.state?.findings || []))
 
 async function loadBundle() {
   workspace.loading = true
   workspace.error = ''
-  const taskId = route.params.taskId
+  const id = route.params.taskId
   try {
-    workspace.task = await fetchTask(taskId)
-    workspace.events = await fetchEvents(taskId)
-    workspace.approvals = await fetchApprovals(taskId)
-    workspace.learningCandidates = await fetchLearningCandidates(taskId)
-    workspace.artifacts = await fetchArtifacts(taskId)
-    try {
-      workspace.report = await fetchReport(taskId)
-    } catch {
-      workspace.report = null
-    }
-    if (workspace.activeTab === 'overview') {
-      workspace.activeTab =
-        workspace.task?.status === 'completed' && workspace.report?.markdown ? 'report' : 'overview'
-    }
-  } catch (requestError) {
-    workspace.error = requestError.response?.data?.detail || requestError.message
+    const [task, events, approvals, candidates, artifacts] = await Promise.all([
+      fetchTask(id), fetchEvents(id), fetchApprovals(id),
+      fetchLearningCandidates(id), fetchArtifacts(id),
+    ])
+    workspace.task = task
+    workspace.events = events
+    workspace.approvals = approvals
+    workspace.learningCandidates = candidates
+    workspace.artifacts = artifacts
+    try { workspace.report = await fetchReport(id) } catch { workspace.report = null }
+  } catch (e) {
+    workspace.error = e.response?.data?.detail || e.message
   } finally {
     workspace.loading = false
   }
@@ -194,102 +132,46 @@ async function loadBundle() {
 
 function connectSocket() {
   disconnectSocket()
-  const taskId = route.params.taskId
-  socket = new WebSocket(buildWsUrl(taskId))
-  socket.onmessage = async (message) => {
-    const payload = JSON.parse(message.data)
-    if (payload.type === 'event') {
-      workspace.events.push(payload.event)
-      await refreshTaskFragments()
-    }
-    if (payload.type === 'task_snapshot') {
-      workspace.task = payload.task
-    }
+  socket = new WebSocket(buildWsUrl(route.params.taskId))
+  socket.onmessage = async (msg) => {
+    const payload = JSON.parse(msg.data)
+    if (payload.type === 'event') workspace.events.push(payload.event)
+    if (payload.type === 'task_snapshot') workspace.task = payload.task
+    // Debounce refreshes to avoid flooding on rapid events
+    clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(() => refreshTaskFragments(), 500)
   }
 }
 
 function disconnectSocket() {
-  if (socket) {
-    socket.close()
-    socket = null
-  }
+  clearTimeout(debounceTimer)
+  if (socket) { socket.close(); socket = null }
 }
 
 async function refreshTaskFragments() {
-  const taskId = route.params.taskId
-  workspace.task = await fetchTask(taskId)
-  workspace.approvals = await fetchApprovals(taskId)
-  workspace.learningCandidates = await fetchLearningCandidates(taskId)
-  workspace.artifacts = await fetchArtifacts(taskId)
+  const id = route.params.taskId
   try {
-    workspace.report = await fetchReport(taskId)
-  } catch {
-    workspace.report = null
-  }
+    const [task, approvals, candidates, artifacts] = await Promise.all([
+      fetchTask(id), fetchApprovals(id), fetchLearningCandidates(id), fetchArtifacts(id),
+    ])
+    workspace.task = task
+    workspace.approvals = approvals
+    workspace.learningCandidates = candidates
+    workspace.artifacts = artifacts
+    try { workspace.report = await fetchReport(id) } catch { workspace.report = null }
+  } catch { /* silent */ }
 }
 
-async function handleRun() {
-  await runTask(route.params.taskId)
-  await loadBundle()
-}
+async function handleRun() { await runTask(route.params.taskId); await loadBundle() }
+async function handlePause() { await pauseTask(route.params.taskId); await loadBundle() }
+async function handleStop() { await stopTask(route.params.taskId); await loadBundle() }
+async function handleApprove(a) { await approveAction(a.id, { note: 'Approved.' }); await loadBundle() }
+async function handleReject(a) { await rejectAction(a.id, { note: 'Rejected.' }); await loadBundle() }
+async function handleEditApprove(a, p) { await editAndApproveAction(a.id, { note: 'Approved with edits.', edited_params: p }); await loadBundle() }
+async function handleApproveLearningCandidate(c, a, r) { await approveLearningCandidate(c.id, { note: 'Approved.', edited_suggested_action: a, edited_verification_recipe: r }); await loadBundle() }
+async function handleRejectLearningCandidate(c) { await rejectLearningCandidate(c.id, { note: 'Rejected.' }); await loadBundle() }
 
-async function handlePause() {
-  await pauseTask(route.params.taskId)
-  await loadBundle()
-}
-
-async function handleStop() {
-  await stopTask(route.params.taskId)
-  await loadBundle()
-}
-
-async function handleApprove(approval) {
-  await approveAction(approval.id, { note: 'Approved from UI.' })
-  await loadBundle()
-}
-
-async function handleReject(approval) {
-  await rejectAction(approval.id, { note: 'Rejected from UI.' })
-  await loadBundle()
-}
-
-async function handleEditApprove(approval, editedParams) {
-  await editAndApproveAction(approval.id, {
-    note: 'Approved with parameter edits from UI.',
-    edited_params: editedParams,
-  })
-  await loadBundle()
-}
-
-async function handleApproveLearningCandidate(candidate, editedAction, editedRecipe) {
-  await approveLearningCandidate(candidate.id, {
-    note: 'Approved from UI for reuse.',
-    edited_suggested_action: editedAction,
-    edited_verification_recipe: editedRecipe,
-  })
-  await loadBundle()
-}
-
-async function handleRejectLearningCandidate(candidate) {
-  await rejectLearningCandidate(candidate.id, {
-    note: 'Rejected from UI.',
-  })
-  await loadBundle()
-}
-
-watch(
-  () => route.params.taskId,
-  async () => {
-    workspace.activeTab = 'overview'
-    await loadBundle()
-    connectSocket()
-  }
-)
-
-onMounted(async () => {
-  await loadBundle()
-  connectSocket()
-})
-
+watch(() => route.params.taskId, async () => { workspace.activeTab = 'overview'; await loadBundle(); connectSocket() })
+onMounted(async () => { await loadBundle(); connectSocket() })
 onUnmounted(disconnectSocket)
 </script>
