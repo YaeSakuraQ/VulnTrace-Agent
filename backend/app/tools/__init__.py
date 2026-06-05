@@ -22,4 +22,15 @@ from app.tools import (
     template_runner,
     vuln_verify,
     web_probe,
+    # Kali tools
+    commix_probe,
+    enum4linux_wrapper,
+    gobuster_enum,
+    hydra_brute,
+    impacket_wrapper,
+    linpeas_runner,
+    searchsploit_lookup,
+    sqlmap_api,
+    whatweb_probe,
+    wpscan_probe,
 )

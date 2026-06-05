@@ -168,6 +168,67 @@ POLICIES: dict[str, RiskPolicy] = {
         tolerance_levels=frozenset({RiskTolerance.STRICT, RiskTolerance.MODERATE}),
         description="Default credential check against known service account lists.",
     ),
+    # ── Kali tools ──────────────────────────────────────────────────────
+    "gobuster_enum": RiskPolicy(
+        tool_name="gobuster_enum",
+        risk_level=RiskLevel.MEDIUM,
+        tolerance_levels=frozenset({RiskTolerance.STRICT}),
+        description="Web directory/DNS enumeration using gobuster with built-in wordlist.",
+    ),
+    "whatweb_probe": RiskPolicy(
+        tool_name="whatweb_probe",
+        risk_level=RiskLevel.LOW,
+        tolerance_levels=frozenset(),
+        description="Web technology stack fingerprinting using whatweb -a 3.",
+    ),
+    "searchsploit_lookup": RiskPolicy(
+        tool_name="searchsploit_lookup",
+        risk_level=RiskLevel.LOW,
+        tolerance_levels=frozenset(),
+        description="Local search of Exploit-DB for matching exploits (no network activity).",
+    ),
+    "enum4linux_wrapper": RiskPolicy(
+        tool_name="enum4linux_wrapper",
+        risk_level=RiskLevel.MEDIUM,
+        tolerance_levels=frozenset({RiskTolerance.STRICT}),
+        description="SMB deep enumeration via enum4linux -a (users, shares, OS, password policy).",
+    ),
+    "hydra_brute": RiskPolicy(
+        tool_name="hydra_brute",
+        risk_level=RiskLevel.CRITICAL,
+        tolerance_levels=frozenset({RiskTolerance.STRICT, RiskTolerance.MODERATE, RiskTolerance.RELAXED}),
+        description="Single-credential brute-force attempt via hydra. High-risk, requires approval under all tolerances except NONE.",
+    ),
+    "sqlmap_api": RiskPolicy(
+        tool_name="sqlmap_api",
+        risk_level=RiskLevel.HIGH,
+        tolerance_levels=frozenset({RiskTolerance.STRICT, RiskTolerance.MODERATE}),
+        description="SQL injection detection via sqlmap in detection-only mode (--dbs stop).",
+    ),
+    "commix_probe": RiskPolicy(
+        tool_name="commix_probe",
+        risk_level=RiskLevel.MEDIUM,
+        tolerance_levels=frozenset({RiskTolerance.STRICT}),
+        description="Command injection detection via commix --batch.",
+    ),
+    "linpeas_runner": RiskPolicy(
+        tool_name="linpeas_runner",
+        risk_level=RiskLevel.MEDIUM,
+        tolerance_levels=frozenset({RiskTolerance.STRICT}),
+        description="Linux privilege escalation enumeration via safe read-only system checks.",
+    ),
+    "impacket_wrapper": RiskPolicy(
+        tool_name="impacket_wrapper",
+        risk_level=RiskLevel.HIGH,
+        tolerance_levels=frozenset({RiskTolerance.STRICT, RiskTolerance.MODERATE}),
+        description="Windows domain penetration tool (secretsdump/smbclient/wmiexec). Requires credentials.",
+    ),
+    "wpscan_probe": RiskPolicy(
+        tool_name="wpscan_probe",
+        risk_level=RiskLevel.MEDIUM,
+        tolerance_levels=frozenset({RiskTolerance.STRICT}),
+        description="WordPress vulnerability scanning via wpscan with HTTP fallback probe.",
+    ),
 }
 
 

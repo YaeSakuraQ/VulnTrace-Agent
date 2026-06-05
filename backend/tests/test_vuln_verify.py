@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import requests as real_requests
+
 from app.schemas.tool import VulnerabilityVerifyInput
 from app.tools.base import ToolContext
 from app.tools import vuln_verify
@@ -33,7 +35,7 @@ def test_vuln_verify_confirms_unauthenticated_json_rpc_access(monkeypatch, tmp_p
             },
         )
 
-    monkeypatch.setattr(vuln_verify.requests, "post", fake_post)
+    monkeypatch.setattr(real_requests, "post", fake_post)
     params = VulnerabilityVerifyInput(
         target="127.0.0.1",
         port=6800,
@@ -63,10 +65,11 @@ def test_vuln_verify_confirms_unauthenticated_json_rpc_access(monkeypatch, tmp_p
 def test_vuln_verify_generic_exploit_detects_path_traversal(monkeypatch, tmp_path: Path) -> None:
     """When profile is generic_exploit, the verifier should attempt common
     traversal payloads and detect path traversal vulnerabilities."""
+
     def fake_post(url: str, **kwargs) -> DummyResponse:
         return DummyResponse(200, {"error": {"code": -32601, "message": "Method not found"}})
 
-    monkeypatch.setattr(vuln_verify.requests, "post", fake_post)
+    monkeypatch.setattr(real_requests, "post", fake_post)
 
     params = VulnerabilityVerifyInput(
         target="127.0.0.1",
@@ -106,7 +109,7 @@ def test_vuln_verify_generic_exploit_detects_sqli_error(monkeypatch, tmp_path: P
     def fake_post(url: str, **kwargs) -> DummySqlResponse:
         return DummySqlResponse(200, {})
 
-    monkeypatch.setattr(vuln_verify.requests, "post", fake_post)
+    monkeypatch.setattr(real_requests, "post", fake_post)
 
     params = VulnerabilityVerifyInput(
         target="127.0.0.1",
@@ -138,7 +141,7 @@ def test_vuln_verify_handles_failure_gracefully(monkeypatch, tmp_path: Path) -> 
     def fake_post(url: str, **kwargs):
         raise ConnectionError("Connection refused")
 
-    monkeypatch.setattr(vuln_verify.requests, "post", fake_post)
+    monkeypatch.setattr(real_requests, "post", fake_post)
 
     params = VulnerabilityVerifyInput(
         target="192.168.255.255",
@@ -147,7 +150,7 @@ def test_vuln_verify_handles_failure_gracefully(monkeypatch, tmp_path: Path) -> 
         profile="json_rpc",
         service_product="unreachable service",
         interesting_paths=[],
-        timeout=5,
+        timeout=30,
     )
     context = ToolContext(
         task_id="unreachable-test",

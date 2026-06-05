@@ -177,3 +177,70 @@ class DefaultCredsInput(BaseModel):
     port: int = Field(ge=1, le=65535)
     scheme: Literal["http", "https"] = "http"
     timeout: int = Field(default=30, ge=10, le=120)
+
+
+# ── Kali tool schemas ────────────────────────────────────────────────────
+
+
+class GobusterEnumInput(BaseModel):
+    target: str = Field(..., description="Target URL or domain")
+    mode: Literal["dir", "dns"] = "dir"
+    port: int = Field(default=80, ge=1, le=65535)
+    scheme: Literal["http", "https"] = "http"
+    timeout: int = Field(default=120, ge=30, le=300)
+
+
+class WhatwebProbeInput(BaseModel):
+    target: str = Field(..., description="Target URL to fingerprint")
+    port: int = Field(default=80, ge=1, le=65535)
+    scheme: Literal["http", "https"] = "http"
+    timeout: int = Field(default=60, ge=15, le=180)
+
+
+class SearchsploitLookupInput(BaseModel):
+    query: str = Field(..., description="Service/version string to search Exploit-DB for")
+
+
+class Enum4linuxWrapperInput(BaseModel):
+    target: str = Field(..., description="Target host for SMB enumeration")
+    timeout: int = Field(default=180, ge=30, le=600)
+
+
+class HydraBruteInput(BaseModel):
+    target: str = Field(..., description="Target host for brute-force")
+    protocol: Literal["ssh", "ftp", "mysql", "postgres", "rdp"] = Field(..., description="Protocol to attack")
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(..., description="Single username to test")
+    password: str = Field(..., description="Single password to test")
+    timeout: int = Field(default=60, ge=15, le=180)
+
+
+class SqlmapApiInput(BaseModel):
+    target: str = Field(..., description="Target URL with parameters, e.g. http://host/page.php?id=1")
+    timeout: int = Field(default=180, ge=30, le=600)
+
+
+class CommixProbeInput(BaseModel):
+    target: str = Field(..., description="Target URL with parameters, e.g. http://host/page.php?cmd=127.0.0.1")
+    timeout: int = Field(default=120, ge=30, le=300)
+
+
+class LinpeasRunnerInput(BaseModel):
+    target: str = Field(default="localhost", description="Target host identifier for result labeling")
+    timeout: int = Field(default=120, ge=15, le=300)
+
+
+class ImpacketWrapperInput(BaseModel):
+    tool: Literal["impacket-secretsdump", "impacket-smbclient", "impacket-wmiexec"] = Field(..., description="Impacket tool to execute")
+    target: str = Field(..., description="Target host (IP or hostname)")
+    domain: str = Field(default="", description="Domain name")
+    username: str = Field(default="", description="Username for authentication")
+    password: str = Field(default="", description="Password for authentication")
+    nt_hash: str = Field(default="", description="NTLM hash for pass-the-hash")
+    command: str = Field(default="", description="Command to execute (for wmiexec)")
+    timeout: int = Field(default=180, ge=30, le=600)
+
+
+class WpscanProbeInput(BaseModel):
+    target: str = Field(..., description="Target WordPress URL base, e.g. http://host/")
+    timeout: int = Field(default=180, ge=30, le=600)
