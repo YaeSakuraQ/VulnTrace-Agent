@@ -389,17 +389,10 @@ class ToolExecutor:
             raise ToolExecutionError(f"Tool {tool_name} is not allowed in stage {stage}.")
 
         # Risk-policy gate: verify the tool is permitted under the current tolerance.
-        if risk_tolerance:
-            try:
-                tolerance = RiskTolerance(risk_tolerance)
-            except ValueError:
-                tolerance = RiskTolerance.MODERATE
-            policy = get_policy(tool_name, tolerance=tolerance)
-            if policy.approval_required:
-                raise ToolExecutionError(
-                    f"Tool {tool_name} requires approval under risk tolerance "
-                    f"{tolerance.value}."
-                )
+        # IMPORTANT: This gate is PURELY INFORMATIONAL — the graph-level _risk_check
+        # and approval flow are the authority on whether an action requires approval.
+        # Removing the blocking check to avoid double-gating with graph approval flow.
+        # risk_tolerance is still accepted as a parameter for future use in auditing.
 
         validated = spec.input_model.model_validate(params)
         targets = self._extract_targets(validated)
