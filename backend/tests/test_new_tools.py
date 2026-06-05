@@ -59,6 +59,7 @@ def test_http_request_sends_post_and_returns_response(monkeypatch, tmp_path: Pat
 
     class FakeResponse:
         status_code = 200
+        url = "http://127.0.0.1:6800/jsonrpc"
         headers = {"Content-Type": "application/json-rpc"}
         text = '{"id":1,"jsonrpc":"2.0","result":{"version":"1.18.8"}}'
 
@@ -245,6 +246,7 @@ def test_sqli_probe_detects_sql_error(monkeypatch, tmp_path: Path) -> None:
     import requests as real_requests
 
     class FakeResponse:
+        url = "http://127.0.0.1:6800/jsonrpc"
         status_code = 200
         text = "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"
 
@@ -308,10 +310,11 @@ def test_default_creds_handles_unreachable(monkeypatch, tmp_path: Path) -> None:
     """default_creds should gracefully handle unreachable targets."""
     import requests as real_requests
 
-    def fake_session_get(self, url, **kwargs):
+    def fake_session_method(self, url, **kwargs):
         raise real_requests.ConnectionError("Connection refused")
 
-    monkeypatch.setattr(real_requests.Session, "get", fake_session_get)
+    monkeypatch.setattr(real_requests.Session, "get", fake_session_method)
+    monkeypatch.setattr(real_requests.Session, "post", fake_session_method)
 
     from app.tools import default_creds
     from app.schemas.tool import DefaultCredsInput

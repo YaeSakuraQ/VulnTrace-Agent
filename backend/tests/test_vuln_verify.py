@@ -71,6 +71,12 @@ def test_vuln_verify_generic_exploit_detects_path_traversal(monkeypatch, tmp_pat
 
     monkeypatch.setattr(real_requests, "post", fake_post)
 
+    # Mock nikto run_command to avoid real subprocess call
+    def fake_run_command(args, timeout, max_output_chars):
+        return "", "", 0
+
+    monkeypatch.setattr(vuln_verify, "run_command", fake_run_command)
+
     params = VulnerabilityVerifyInput(
         target="127.0.0.1",
         port=8080,
@@ -111,6 +117,12 @@ def test_vuln_verify_generic_exploit_detects_sqli_error(monkeypatch, tmp_path: P
 
     monkeypatch.setattr(real_requests, "post", fake_post)
 
+    # Mock nikto run_command to avoid real subprocess call
+    def fake_run_command(args, timeout, max_output_chars):
+        return "", "", 0
+
+    monkeypatch.setattr(vuln_verify, "run_command", fake_run_command)
+
     params = VulnerabilityVerifyInput(
         target="127.0.0.1",
         port=8080,
@@ -139,7 +151,7 @@ def test_vuln_verify_handles_failure_gracefully(monkeypatch, tmp_path: Path) -> 
     raising an unhandled exception."""
 
     def fake_post(url: str, **kwargs):
-        raise ConnectionError("Connection refused")
+        raise real_requests.ConnectionError("Connection refused")
 
     monkeypatch.setattr(real_requests, "post", fake_post)
 
