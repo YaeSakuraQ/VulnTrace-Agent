@@ -55,6 +55,7 @@
       <n-tab-pane name="learning" tab="Learning">
         <LearningCandidatePanel
           :candidates="workspace.learningCandidates"
+          :task-id="$route.params.taskId"
           @approve="handleApproveLearningCandidate" @reject="handleRejectLearningCandidate"
         />
       </n-tab-pane>

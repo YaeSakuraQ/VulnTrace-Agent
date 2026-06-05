@@ -6,12 +6,17 @@
         <h3>经验候选</h3>
       </div>
       <div class="section-header__tags">
-        <n-tag v-if="loading" round size="small" :bordered="false" type="info">
-          加载中...
-        </n-tag>
-        <n-tag round size="small" :bordered="false" type="info">
-          {{ pending.length }} 待审核
-        </n-tag>
+        <n-tag v-if="loading" round size="small" :bordered="false" type="info">Loading…</n-tag>
+        <n-tag round size="small" :bordered="false" type="info">{{ pending.length }} pending</n-tag>
+        <n-button quaternary size="small" @click="handlePublish" :loading="publishing">
+          <template #icon><BookOpen :size="14" /></template>Publish
+        </n-button>
+        <n-popconfirm @positive-click="handleSearchsploitExpand">
+          <template #trigger>
+            <n-button quaternary size="small"><template #icon><Search :size="14" /></template>Expand</n-button>
+          </template>
+          Search Exploit-DB for all task services and propose new signatures?
+        </n-popconfirm>
       </div>
     </div>
 
@@ -166,14 +171,18 @@ import {
   NCard,
   NEmpty,
   NInput,
+  NPopconfirm,
   NSpin,
   NTag,
   useMessage,
 } from 'naive-ui'
+import { BookOpen, Search } from '@lucide/vue'
 
+import { publishKnowledge, runSearchsploitExpansion } from '../api/tasks'
 import { riskTagType } from '../utils/ui'
 
 const props = defineProps({
+  taskId: { type: String, default: null },
   candidates: {
     type: Array,
     default: () => [],
@@ -185,7 +194,40 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['approve', 'reject'])
+const publishing = ref(false)
+const expanding = ref(false)
 const message = useMessage()
+
+async function handlePublish() {
+  publishing.value = true
+  try {
+    const result = await publishKnowledge()
+    message.success(`Published: ${result.signatures_total} signatures in ${result.families_total} families`)
+  } catch (e) {
+    message.error('Publish failed: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    publishing.value = false
+  }
+}
+
+async function handleSearchsploitExpand() {
+  if (!props.taskId) {
+    message.warning('No task selected for expansion.')
+    return
+  }
+  expanding.value = true
+  try {
+    const result = await runSearchsploitExpansion(props.taskId)
+    message.success(
+      `Exploit-DB search complete: ${result.proposed} proposed, ` +
+      `${result.published.length} auto-published, ${result.review_needed.length} need review`
+    )
+  } catch (e) {
+    message.error('Expansion failed: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    expanding.value = false
+  }
+}
 const actionDrafts = reactive({})
 const recipeDrafts = reactive({})
 const actionValidation = reactive({})

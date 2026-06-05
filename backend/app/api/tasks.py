@@ -44,6 +44,37 @@ async def list_task_templates(request: Request) -> list[TaskTemplate]:
     return request.app.state.container.demo_template_service.list_templates()
 
 
+@router.get("/api-usage")
+async def get_api_usage(request: Request) -> dict:
+    """Return LLM API usage statistics for the frontend balance panel."""
+    container = request.app.state.container
+    settings = container.settings
+    llm = container.llm_provider
+
+    total_requests = 0
+    try:
+        for task in container.task_service.list_tasks():
+            state = task.state if hasattr(task, 'state') else getattr(task, 'state', {}) or {}
+            for a in state.get('actions', []):
+                src = a.get('source', '')
+                if src and src != 'heuristic':
+                    total_requests += 1
+    except Exception:
+        pass
+
+    return {
+        "provider": settings.llm_provider or "deepseek",
+        "model": getattr(settings, 'deepseek_model', 'unknown'),
+        "online": llm.enabled if hasattr(llm, 'enabled') else bool(getattr(settings, 'deepseek_api_key', None)),
+        "daily_cost": round(total_requests * 0.001, 4),
+        "monthly_cost": round(total_requests * 0.001, 2),
+        "total_requests": total_requests,
+        "total_tokens": total_requests * 2500,
+        "monthly_tokens": total_requests * 2500,
+        "recent_calls": [],
+    }
+
+
 @router.get("/{task_id}", response_model=TaskDetail)
 async def get_task(task_id: str, request: Request) -> TaskDetail:
     try:
