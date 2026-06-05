@@ -89,3 +89,24 @@ export async function rejectLearningCandidate(candidateId, payload) {
   const { data } = await apiClient.post(`/learning-candidates/${candidateId}/reject`, payload)
   return data
 }
+
+export async function publishKnowledge() {
+  const { data } = await apiClient.post('/learning-candidates/publish-knowledge')
+  return data
+}
+
+export async function runSearchsploitExpansion(taskId, autoPublish = false) {
+  const { data } = await apiClient.post('/learning-candidates/searchsploit-expand', null, {
+    params: { task_id: taskId, auto_publish: autoPublish },
+  })
+  return data
+}
+
+export async function fetchApiUsage() {
+  try {
+    const { data } = await apiClient.get('/tasks/api-usage')
+    return data
+  } catch {
+    return null
+  }
+}

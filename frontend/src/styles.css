@@ -138,6 +138,11 @@ pre {
   gap: 28px;
   align-items: start;
 }
+@media (max-width: 960px) {
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+}
 
 .stack,
 .stack-lg,
