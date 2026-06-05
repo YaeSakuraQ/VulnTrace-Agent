@@ -52,6 +52,12 @@ POLICIES = {
         approval_required=False,
         description="Structured HTTP request primitive for targeted observation.",
     ),
+    "http_request": RiskPolicy(
+        tool_name="http_request",
+        risk_level="medium",
+        approval_required=False,
+        description="Structured standard HTTP request primitive for bounded API and RPC capability checks.",
+    ),
     "header_mutation": RiskPolicy(
         tool_name="header_mutation",
         risk_level="high",

@@ -62,4 +62,23 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 """
 
-SCHEMA = [TASKS_TABLE, EVENTS_TABLE, APPROVALS_TABLE, ARTIFACTS_TABLE]
+LEARNING_CANDIDATES_TABLE = """
+CREATE TABLE IF NOT EXISTS learning_candidates (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    fingerprint_key TEXT NOT NULL,
+    signature_json TEXT NOT NULL,
+    suggested_action_json TEXT NOT NULL,
+    verification_recipe_json TEXT NOT NULL,
+    evidence_markers_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    review_note TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
+"""
+
+SCHEMA = [TASKS_TABLE, EVENTS_TABLE, APPROVALS_TABLE, ARTIFACTS_TABLE, LEARNING_CANDIDATES_TABLE]

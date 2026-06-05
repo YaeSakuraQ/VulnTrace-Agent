@@ -12,6 +12,7 @@ from app.schemas.tool import (
     FfufEnumInput,
     HeaderMutationInput,
     HttpGetInput,
+    HttpRequestInput,
     HttpSnapshotInput,
     RawHttpInput,
     ServiceFingerprintInput,
@@ -21,6 +22,7 @@ from app.schemas.tool import (
     WebProbeInput,
 )
 from app.services.exploit_knowledge_mapper import ExploitKnowledgeMapper
+from app.services.knowledge_capture_service import KnowledgeCaptureService
 from app.services.deepseek_client import DeepSeekClient
 from app.services.knowledge_retriever import KnowledgeRetriever
 
@@ -59,6 +61,7 @@ class PlannerService:
         "asset_discovery": AssetDiscoveryInput,
         "service_fingerprint": ServiceFingerprintInput,
         "http_get": HttpGetInput,
+        "http_request": HttpRequestInput,
         "web_probe": WebProbeInput,
         "dir_enum": DirEnumInput,
         "ffuf_enum": FfufEnumInput,
@@ -76,10 +79,12 @@ class PlannerService:
         deepseek_client: DeepSeekClient,
         exploit_mapper: ExploitKnowledgeMapper,
         knowledge_retriever: KnowledgeRetriever,
+        knowledge_capture_service: KnowledgeCaptureService | None = None,
     ) -> None:
         self.deepseek_client = deepseek_client
         self.exploit_mapper = exploit_mapper
         self.knowledge_retriever = knowledge_retriever
+        self.knowledge_capture_service = knowledge_capture_service
 
     def plan(self, state: dict[str, Any]) -> PlanDecision:
         return self.choose_action(state)
@@ -89,6 +94,11 @@ class PlannerService:
         query = self._build_knowledge_query(state)
         knowledge_hits = self.knowledge_retriever.search(query)
         reflection_candidates = self._normalized_reflection_candidates(state)
+        learning_candidates = (
+            [item.model_dump() for item in self.knowledge_capture_service.suggest(state)]
+            if self.knowledge_capture_service
+            else []
+        )
         exploit_candidates = [item.model_dump() for item in self.exploit_mapper.suggest(state)]
 
         if self.deepseek_client.enabled and not heuristic_plan.stop:
@@ -101,29 +111,28 @@ class PlannerService:
                         allowed_tools=self.allowed_tool_specs_for_stage(heuristic_plan.stage),
                         reflection_candidates=reflection_candidates,
                         knowledge_hits=knowledge_hits,
-                        exploit_candidates=exploit_candidates,
+                        exploit_candidates=[*learning_candidates, *exploit_candidates],
                         heuristic_plan=heuristic_plan.model_dump(),
                     ),
                 )
-                validated = self._validate_plan(llm_plan)
-                validated.risk_level = get_policy(validated.tool_name).risk_level if validated.tool_name else validated.risk_level
-                validated.requires_approval = (
-                    get_policy(validated.tool_name).approval_required if validated.tool_name else False
-                )
+                validated = self._hydrate_plan_policy(self._validate_plan(llm_plan))
                 validated.source = "llm"
                 return validated
             except Exception:
                 pass
 
-        if heuristic_plan.source == "heuristic":
-            heuristic_plan.source = "heuristic"
-        return heuristic_plan
+        return self._hydrate_plan_policy(heuristic_plan)
 
     def reflect(self, state: dict[str, Any]) -> ReflectionDecision:
         heuristic = self._heuristic_reflection(state)
         query = self._build_knowledge_query(state)
         knowledge_hits = self.knowledge_retriever.search(query)
-        exploit_candidates = [item.model_dump() for item in self.exploit_mapper.suggest(state)]
+        learning_candidates = (
+            [item.model_dump() for item in self.knowledge_capture_service.suggest(state)]
+            if self.knowledge_capture_service
+            else []
+        )
+        exploit_candidates = [*learning_candidates, *[item.model_dump() for item in self.exploit_mapper.suggest(state)]]
 
         if self.deepseek_client.enabled and state.get("last_result"):
             try:
@@ -151,6 +160,7 @@ class PlannerService:
             "asset_discovery",
             "service_fingerprint",
             "http_get",
+            "http_request",
             "web_probe",
             "dir_enum",
             "ffuf_enum",
@@ -202,6 +212,14 @@ class PlannerService:
         evidence = state.get("evidence", [])
         actions = state.get("actions", [])
         reflection_candidates = self._normalized_reflection_candidates(state)
+        learning_candidates = (
+            [
+                item.model_dump() if hasattr(item, "model_dump") else item
+                for item in self.knowledge_capture_service.suggest(state)
+            ]
+            if self.knowledge_capture_service
+            else []
+        )
         exploit_candidates = self.exploit_mapper.suggest(state)
 
         if not hosts:
@@ -254,6 +272,21 @@ class PlannerService:
                 family_details=list(candidate.get("family_details", [])),
                 selected_family=candidate.get("selected_family"),
             )
+        if learning_candidates:
+            candidate = learning_candidates[0]
+            return PlanDecision(
+                stage=str(candidate.get("stage", "exploit")),
+                tool_name=str(candidate.get("tool_name")),
+                params=dict(candidate.get("params", {})),
+                rationale=str(candidate.get("rationale", "Reviewed learning candidate selected.")),
+                expected_evidence=[str(item) for item in candidate.get("expected_evidence", [])],
+                risk_level=str(candidate.get("risk_level", "medium")),
+                requires_approval=bool(candidate.get("requires_approval", False)),
+                source=str(candidate.get("source", "learning")),
+                families=list(candidate.get("families", [])),
+                family_details=list(candidate.get("family_details", [])),
+                selected_family=candidate.get("selected_family"),
+            )
         if exploit_candidates:
             candidate = exploit_candidates[0]
             return PlanDecision(
@@ -273,14 +306,14 @@ class PlannerService:
         probed_endpoints = {
             (item.get("target"), item.get("port"))
             for item in evidence
-            if item.get("kind") == "web_probe"
+            if item.get("kind") in {"web_probe", "http_get", "http_request"}
         } | {
             (
                 action.get("params", {}).get("target"),
                 action.get("params", {}).get("port"),
             )
             for action in actions
-            if action.get("tool_name") == "web_probe"
+            if action.get("tool_name") in {"web_probe", "http_get", "http_request"}
         }
         next_web_service = next(
             (
@@ -307,6 +340,10 @@ class PlannerService:
                 risk_level="low",
             )
 
+        safe_rpc_probe = self._build_safe_rpc_probe_plan(state, web_services)
+        if safe_rpc_probe is not None:
+            return safe_rpc_probe
+
         enumerated_endpoints = {
             (item.get("target"), item.get("port"))
             for item in evidence
@@ -323,6 +360,7 @@ class PlannerService:
             (
                 service
                 for service in web_services
+                if not self._is_json_rpc_candidate(state, service)
                 if (service["target"], service["port"]) not in enumerated_endpoints
             ),
             None,
@@ -359,6 +397,7 @@ class PlannerService:
             (
                 service
                 for service in web_services
+                if not self._is_json_rpc_candidate(state, service)
                 if (service["target"], service["port"]) not in ffuf_targets
             ),
             None,
@@ -408,6 +447,7 @@ class PlannerService:
             (
                 service
                 for service in web_services
+                if not self._is_json_rpc_candidate(state, service)
                 if (service["target"], service["port"]) not in snapshotted_targets
             ),
             None,
@@ -450,6 +490,7 @@ class PlannerService:
                 )
                 not in template_scanned_targets
                 and self._has_meaningful_web_evidence(state, service)
+                and self._guess_verify_profile(state, service) != "json_rpc"
             ),
             None,
         )
@@ -469,8 +510,36 @@ class PlannerService:
                 risk_level="medium",
             )
 
+        next_verify_target = next(
+            (
+                service
+                for service in web_services
+                if self._should_run_generic_verifier(state, service)
+            ),
+            None,
+        )
+        if next_verify_target:
+            profile = self._guess_verify_profile(state, next_verify_target)
+            return PlanDecision(
+                stage="exploit",
+                tool_name="vuln_verify",
+                params=self._build_verify_params(state, next_verify_target),
+                rationale=(
+                    "Observation completed with enough structured evidence to run a controlled verifier."
+                    if profile != "json_rpc"
+                    else "JSON-RPC interaction indicators are strong enough to justify a controlled verifier for unauthorized method access."
+                ),
+                expected_evidence=(
+                    ["Verification status, findings, and concrete PoC evidence"]
+                    if profile != "json_rpc"
+                    else ["Evidence that safe JSON-RPC methods can or cannot be invoked without authentication"]
+                ),
+                risk_level="high",
+                requires_approval=True,
+            )
+
         if web_services and not any(
-            action.get("tool_name") in {"header_mutation", "raw_http", "tcp_send", "vuln_verify"}
+            action.get("tool_name") in {"header_mutation", "raw_http", "tcp_send", "vuln_verify", "http_request"}
             for action in actions
         ):
             return PlanDecision(
@@ -498,6 +567,7 @@ class PlannerService:
         tool_name = str(last_result.get("tool_name", "unknown"))
         structured = last_result.get("structured_data", {}) or {}
         hypotheses: list[dict[str, Any]] = []
+        next_candidates: list[dict[str, Any]] = []
         failure_class = self._classify_failure(state, last_result)
         previous_family = str((state.get("last_decision") or {}).get("selected_family") or "") or None
 
@@ -512,6 +582,62 @@ class PlannerService:
                         "status": "unverified",
                     }
                 )
+
+        if tool_name == "http_request":
+            path = str(structured.get("path", ""))
+            body_snippet = str(structured.get("body_snippet", "")).lower()
+            status_code = int(structured.get("status_code", 0) or 0)
+            if path in {"/jsonrpc", "/rpc", "/api/jsonrpc"}:
+                if "no such method" in body_snippet:
+                    hypotheses.append(
+                        {
+                            "title": "The RPC endpoint is reachable, but the method name is incorrect",
+                            "rationale": "A structured method-not-found response proves the endpoint exists and parsed the request.",
+                            "severity": "medium",
+                            "status": "partially_verified",
+                        }
+                    )
+                    service = (state.get("services") or [{}])[0]
+                    next_candidates.append(
+                        {
+                            "tool_name": "http_request",
+                            "stage": "enumerate",
+                            "params": {
+                                "target": service.get("target", state.get("scope", [""])[0]),
+                                "port": service.get("port", int(str(state.get("ports", "0")).split(",")[0].split("-")[0] or 0)),
+                                "scheme": "https" if int(service.get("port", 0) or 0) in {443, 8443} else "http",
+                                "path": path,
+                                "method": "POST",
+                                "headers": {"Content-Type": "application/json"},
+                                "body": self._build_safe_rpc_probe_body(service),
+                                "allow_redirects": False,
+                                "timeout": 15,
+                            },
+                            "rationale": "Retry the reachable RPC endpoint with a safer service-aware capability method.",
+                            "expected_evidence": ["A structured JSON-RPC result or a clearer authorization/error signal"],
+                            "source": "reflection",
+                        }
+                    )
+                elif status_code == 200 and "\"result\"" in body_snippet:
+                    hypotheses.append(
+                        {
+                            "title": "The RPC endpoint accepted a safe method call without authentication",
+                            "rationale": "A JSON-RPC result object indicates the endpoint is both reachable and actionable.",
+                            "severity": "high",
+                            "status": "verified",
+                        }
+                    )
+                    service = (state.get("services") or [{}])[0]
+                    next_candidates.append(
+                        {
+                            "tool_name": "vuln_verify",
+                            "stage": "exploit",
+                            "params": self._build_verify_params(state, service),
+                            "rationale": "Use the controlled verifier to consolidate unauthorized RPC evidence into structured findings and PoC output.",
+                            "expected_evidence": ["Structured verification status, findings, and safe PoC evidence"],
+                            "source": "reflection",
+                        }
+                    )
 
         if tool_name in {"header_mutation", "raw_http", "vuln_verify"}:
             status_code = int(structured.get("status_code", 0) or 0)
@@ -546,14 +672,14 @@ class PlannerService:
                     }
                 )
 
-        next_candidates = []
         selected_family = None
         rejected_families: list[str] = []
         family_switch_reason = None
         candidate_models = self._prioritize_candidates([item.model_dump() for item in self.exploit_mapper.suggest(state)])
         if candidate_models:
-            next_candidates = candidate_models[:3]
-            selected_family = candidate_models[0].get("selected_family")
+            next_candidates = self._prioritize_candidates([*next_candidates, *candidate_models])[:3]
+        if next_candidates:
+            selected_family = next_candidates[0].get("selected_family")
             if previous_family and selected_family and previous_family != selected_family:
                 rejected_families = [previous_family]
                 family_switch_reason = (
@@ -587,11 +713,12 @@ class PlannerService:
             if not tool_name:
                 continue
             try:
+                tool_name, params = self._normalize_candidate_tool(tool_name, candidate.get("params", {}))
                 plan = PlanDecision.model_validate(
                     {
                         "stage": candidate.get("stage", "exploit"),
                         "tool_name": tool_name,
-                        "params": candidate.get("params", {}),
+                        "params": params,
                         "rationale": candidate.get("rationale", "Reflection-proposed candidate."),
                         "expected_evidence": candidate.get("expected_evidence", []),
                         "risk_level": candidate.get("risk_level", "high"),
@@ -603,7 +730,7 @@ class PlannerService:
                         "selected_family": candidate.get("selected_family"),
                     }
                 )
-                validated = self._validate_plan(plan)
+                validated = self._hydrate_plan_policy(self._validate_plan(plan))
                 normalized.append(validated.model_dump())
             except Exception:
                 continue
@@ -613,7 +740,7 @@ class PlannerService:
         def priority(item: dict[str, Any]) -> tuple:
             source = str(item.get("source", ""))
             return (
-                0 if source in {"reflection", "corpus_reflection", "llm_reflection"} else 1,
+                0 if source in {"reflection", "corpus_reflection", "llm_reflection"} else 1 if source == "learning" else 2,
                 1 if bool(item.get("fallback_only", False)) else 0,
                 0 if str(item.get("confidence", "")) == "high" else 1,
                 str(item.get("title", "")),
@@ -641,6 +768,8 @@ class PlannerService:
             return "blocked_request"
         if status_code == 404:
             return "target_not_found"
+        if "no such method" in body_preview or "no such method" in raw_response:
+            return "method_not_found"
         if status_code == 400 or "can't parse request" in body_preview or "can't parse request" in raw_response:
             return "parse_failure"
         return "none"
@@ -657,6 +786,7 @@ class PlannerService:
             return plan
         if not plan.tool_name:
             raise ValueError("Planner returned a non-stop action without a tool name.")
+        plan = self._coerce_plan(plan)
         allowed = self.allowed_tools_for_stage(plan.stage)
         if plan.tool_name not in allowed:
             raise ValueError(f"Tool {plan.tool_name} is not allowed in stage {plan.stage}.")
@@ -665,6 +795,106 @@ class PlannerService:
             validated_params = model.model_validate(plan.params)
             plan.params = validated_params.model_dump()
         return plan
+
+    def _hydrate_plan_policy(self, plan: PlanDecision) -> PlanDecision:
+        if plan.stop or not plan.tool_name:
+            return plan
+        policy = get_policy(plan.tool_name)
+        plan.risk_level = policy.risk_level
+        plan.requires_approval = policy.approval_required
+        if plan.tool_name == "http_request":
+            method = str(plan.params.get("method", "GET")).upper()
+            if method in {"GET", "HEAD", "OPTIONS"}:
+                plan.risk_level = "low"
+                plan.requires_approval = False
+            elif plan.stage == "exploit":
+                plan.risk_level = "high"
+                plan.requires_approval = True
+            else:
+                plan.risk_level = "medium"
+                plan.requires_approval = False
+        return plan
+
+    def _normalize_candidate_tool(self, tool_name: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        alias = tool_name.lower()
+        if alias in {"http_post", "http_head", "http_options"}:
+            method = {
+                "http_post": "POST",
+                "http_head": "HEAD",
+                "http_options": "OPTIONS",
+            }[alias]
+            updated = dict(params)
+            updated["method"] = method
+            return "http_request", updated
+        return tool_name, params
+
+    def _coerce_plan(self, plan: PlanDecision) -> PlanDecision:
+        if plan.tool_name != "raw_http" or plan.stage == "exploit":
+            return plan
+        parsed = self._parse_standard_http_request(plan.params)
+        if not parsed:
+            return plan
+        return PlanDecision(
+            stage=plan.stage,
+            tool_name="http_request",
+            params=parsed,
+            rationale=plan.rationale,
+            expected_evidence=plan.expected_evidence,
+            risk_level=plan.risk_level,
+            requires_approval=plan.requires_approval,
+            stop=plan.stop,
+            stop_reason=plan.stop_reason,
+            source=plan.source,
+            families=plan.families,
+            family_details=plan.family_details,
+            selected_family=plan.selected_family,
+        )
+
+    def _parse_standard_http_request(self, params: dict[str, Any]) -> dict[str, Any] | None:
+        request = str(params.get("request", ""))
+        if not request:
+            return None
+        lines = request.split("\r\n")
+        if len(lines) < 2:
+            return None
+        request_line = lines[0].split()
+        if len(request_line) != 3:
+            return None
+        method, path, protocol = request_line
+        if method not in {"GET", "HEAD", "OPTIONS", "POST"}:
+            return None
+        if protocol not in {"HTTP/1.0", "HTTP/1.1"} or not path.startswith("/"):
+            return None
+        headers: dict[str, str] = {}
+        body_lines: list[str] = []
+        in_body = False
+        for line in lines[1:]:
+            if in_body:
+                body_lines.append(line)
+                continue
+            if line == "":
+                in_body = True
+                continue
+            if ":" not in line:
+                return None
+            key, value = line.split(":", 1)
+            header_name = key.strip()
+            header_value = value.strip()
+            if header_name.lower() == "host" and not header_value:
+                return None
+            headers[header_name] = header_value
+        scheme = "https" if int(params.get("port", 0) or 0) in {443, 8443} else "http"
+        return {
+            "target": params.get("target"),
+            "port": params.get("port"),
+            "scheme": scheme,
+            "path": path,
+            "method": method,
+            "headers": headers,
+            "body": "\r\n".join(body_lines),
+            "allow_redirects": method != "POST",
+            "timeout": params.get("timeout", 15),
+        }
 
 
     def _is_web_service(self, service: dict[str, Any]) -> bool:
@@ -720,7 +950,73 @@ class PlannerService:
                 lowered_snippet = body_snippet.lower()
                 if body_snippet and "404" not in lowered_snippet and "not found" not in lowered_snippet:
                     return True
+            if item.get("kind") in {"http_get", "http_request"}:
+                status_code = int(item.get("data", {}).get("status_code", 0))
+                path = str(item.get("data", {}).get("path", ""))
+                if path in {"/jsonrpc", "/rpc", "/api/jsonrpc"} and status_code in {200, 400, 401, 403, 405, 500}:
+                    return True
         return False
+
+    def _build_safe_rpc_probe_plan(
+        self,
+        state: dict[str, Any],
+        web_services: list[dict[str, Any]],
+    ) -> PlanDecision | None:
+        observed_rpc_requests = {
+            (
+                action.get("tool_name"),
+                action.get("params", {}).get("target"),
+                action.get("params", {}).get("port"),
+                action.get("params", {}).get("path"),
+                action.get("params", {}).get("method"),
+            )
+            for action in state.get("actions", [])
+            if action.get("tool_name") in {"http_request", "http_get"}
+        }
+        for service in web_services:
+            rpc_path = self._guess_rpc_path(state, service)
+            if not rpc_path or not self._is_json_rpc_candidate(state, service):
+                continue
+            marker = ("http_request", service["target"], service["port"], rpc_path, "POST")
+            if marker in observed_rpc_requests:
+                continue
+            body = self._build_safe_rpc_probe_body(service)
+            return PlanDecision(
+                stage="enumerate",
+                tool_name="http_request",
+                params={
+                    "target": service["target"],
+                    "port": service["port"],
+                    "scheme": "https" if service["port"] in {443, 8443} else "http",
+                    "path": rpc_path,
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": body,
+                    "allow_redirects": False,
+                    "timeout": 15,
+                },
+                rationale="A discovered RPC-like endpoint warrants one safe structured capability probe before exploit-specific validation.",
+                expected_evidence=["HTTP status and JSON-RPC response proving whether the endpoint accepts unauthenticated method calls"],
+                risk_level="medium",
+                requires_approval=False,
+            )
+        return None
+
+    def _should_run_generic_verifier(self, state: dict[str, Any], service: dict[str, Any]) -> bool:
+        if not self._has_meaningful_web_evidence(state, service):
+            return False
+        target = service["target"]
+        port = service["port"]
+        for action in state.get("actions", []):
+            if action.get("tool_name") != "vuln_verify":
+                continue
+            params = action.get("params", {})
+            if params.get("target") == target and int(params.get("port", 0) or 0) == port:
+                return False
+        profile = self._guess_verify_profile(state, service)
+        if profile == "generic_web":
+            return False
+        return True
 
     def _build_verify_params(self, state: dict[str, Any], service: dict[str, Any]) -> dict[str, Any]:
         profile = self._guess_verify_profile(state, service)
@@ -739,7 +1035,7 @@ class PlannerService:
             "page_title": self._collect_page_title(state, service),
             "headers": headers,
             "interesting_paths": self._collect_interesting_paths(state, service),
-            "timeout": 45 if profile == "php_apache" else 30 if profile == "mini_httpd" else 60,
+            "timeout": 45 if profile == "php_apache" else 30 if profile in {"mini_httpd", "json_rpc"} else 60,
         }
 
     def _guess_verify_profile(self, state: dict[str, Any], service: dict[str, Any]) -> str:
@@ -758,6 +1054,8 @@ class PlannerService:
             return "php_apache"
         if any(marker in interesting_paths for marker in ["/login.php", "/setup.php", "/phpinfo.php"]):
             return "php_apache"
+        if self._is_json_rpc_candidate(state, service):
+            return "json_rpc"
         return "generic_web"
 
     def _collect_page_title(self, state: dict[str, Any], service: dict[str, Any]) -> str:
@@ -797,6 +1095,74 @@ class PlannerService:
             if isinstance(path, str) and path not in paths:
                 paths.append(path)
         return paths[:8]
+
+    def _is_json_rpc_candidate(self, state: dict[str, Any], service: dict[str, Any]) -> bool:
+        service_text = " ".join(
+            [
+                str(service.get("service", "")),
+                str(service.get("product", "")),
+                str(service.get("version", "")),
+                str(state.get("lab_description", "")),
+            ]
+        ).lower()
+        if any(marker in service_text for marker in ["json-rpc", "json rpc", "xml-rpc", "aria2", "rpc"]):
+            return True
+        target = service["target"]
+        port = service["port"]
+        for item in state.get("evidence", []):
+            if item.get("target") != target or item.get("port") != port:
+                continue
+            if item.get("kind") not in {"http_get", "http_request"}:
+                continue
+            path = str(item.get("data", {}).get("path", ""))
+            status_code = int(item.get("data", {}).get("status_code", 0))
+            body_snippet = str(item.get("data", {}).get("body_snippet", "")).lower()
+            if path in {"/jsonrpc", "/rpc", "/api/jsonrpc"} and status_code in {200, 400, 401, 403, 405}:
+                return True
+            if "json-rpc" in body_snippet or "invalid request" in body_snippet:
+                return True
+        return False
+
+    def _guess_rpc_path(self, state: dict[str, Any], service: dict[str, Any]) -> str | None:
+        interesting_paths = self._collect_interesting_paths(state, service)
+        for path in interesting_paths:
+            if path in {"/jsonrpc", "/rpc", "/api/jsonrpc"}:
+                return path
+        target = service["target"]
+        port = service["port"]
+        for item in state.get("evidence", []):
+            if item.get("target") != target or item.get("port") != port:
+                continue
+            path = str(item.get("data", {}).get("path", ""))
+            if path in {"/jsonrpc", "/rpc", "/api/jsonrpc"}:
+                return path
+        service_text = " ".join(
+            [
+                str(service.get("service", "")),
+                str(service.get("product", "")),
+                str(service.get("version", "")),
+                str(state.get("lab_description", "")),
+            ]
+        ).lower()
+        if "aria2" in service_text:
+            return "/jsonrpc"
+        if "json-rpc" in service_text or "json rpc" in service_text:
+            return "/jsonrpc"
+        if "xml-rpc" in service_text:
+            return "/rpc"
+        return None
+
+    def _build_safe_rpc_probe_body(self, service: dict[str, Any]) -> str:
+        service_text = " ".join(
+            [
+                str(service.get("service", "")),
+                str(service.get("product", "")),
+                str(service.get("version", "")),
+            ]
+        ).lower()
+        if "aria2" in service_text:
+            return '{"jsonrpc":"2.0","id":1,"method":"aria2.getVersion","params":[]}'
+        return '{"jsonrpc":"2.0","id":1,"method":"rpc.discover","params":[]}'
 
     def _looks_like_dvwa(self, state: dict[str, Any], service: dict[str, Any]) -> bool:
         title = self._collect_page_title(state, service).lower()

@@ -71,6 +71,18 @@ class HttpGetInput(BaseModel):
     timeout: int = Field(default=15, ge=3, le=120)
 
 
+class HttpRequestInput(BaseModel):
+    target: str
+    port: int = Field(ge=1, le=65535)
+    scheme: Literal["http", "https"] = "http"
+    path: str = "/"
+    method: Literal["GET", "HEAD", "OPTIONS", "POST"] = "GET"
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str = Field(default="", max_length=2000)
+    allow_redirects: bool = True
+    timeout: int = Field(default=15, ge=3, le=120)
+
+
 class HeaderMutationInput(BaseModel):
     target: str
     port: int = Field(ge=1, le=65535)
@@ -109,7 +121,7 @@ class VulnerabilityVerifyInput(BaseModel):
     target: str
     port: int = Field(ge=1, le=65535)
     scheme: Literal["http", "https"] = "http"
-    profile: Literal["auto", "php_apache", "mini_httpd", "generic_web"] = "auto"
+    profile: Literal["auto", "php_apache", "mini_httpd", "json_rpc", "generic_web"] = "auto"
     preferred_poc: Literal["auto", "dvwa_fi", "none"] = "auto"
     service_name: str = ""
     service_product: str = ""

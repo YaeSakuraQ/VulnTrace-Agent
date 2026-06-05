@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from app.agents.report_agent import ReportAgent
 from app.agents.result_parser import ResultParser
-from app.schemas.task import TaskDetail, TaskEvent
+from app.schemas.task import ArtifactRecord, TaskDetail, TaskEvent
 from app.schemas.tool import ToolExecutionResult
 from app.services.artifact_store import ArtifactStore
 
@@ -182,5 +182,109 @@ def test_report_agent_renders_poc_section(tmp_path) -> None:
     assert "parse_failure" in markdown_content
     assert "empty_header" in markdown_content
     assert "absolute_path" in markdown_content
+    assert report_path.endswith("report.md")
+    assert "<h2>PoC 明细</h2>" in html_content
+
+
+def test_report_agent_synthesizes_poc_when_confirmed_finding_has_no_recorded_poc(tmp_path) -> None:
+    now = _now()
+    agent = ReportAgent(ArtifactStore(tmp_path))
+    task = TaskDetail(
+        id="jsonrpc-task",
+        name="JSON-RPC Report",
+        scope=["127.0.0.1"],
+        authorization="authorized local lab",
+        lab_description="aria2 json-rpc service on port 6800",
+        objective="Confirm unauthorized JSON-RPC access.",
+        ports="6800",
+        current_stage="generate_report",
+        status="completed",
+        created_at=now,
+        updated_at=now,
+        started_at=now,
+        finished_at=now,
+        report_path=None,
+        stop_reason=None,
+        state={
+            "hosts": [{"address": "127.0.0.1", "status": "up"}],
+            "services": [
+                {
+                    "target": "127.0.0.1",
+                    "port": 6800,
+                    "protocol": "tcp",
+                    "service": "http",
+                    "product": "aria2 downloader JSON-RPC",
+                    "version": "1.18.8",
+                }
+            ],
+            "findings": [
+                {
+                    "title": "Unauthenticated JSON-RPC method call succeeded on /jsonrpc",
+                    "severity": "high",
+                    "confidence": "confirmed",
+                    "evidence_summary": "Safe method aria2.getVersion returned a JSON-RPC result without authentication.",
+                }
+            ],
+            "hypotheses": [],
+            "evidence": [
+                {
+                    "kind": "http_request",
+                    "target": "127.0.0.1",
+                    "port": 6800,
+                    "summary": "POST /jsonrpc -> 200",
+                    "data": {
+                        "url": "http://127.0.0.1:6800/jsonrpc",
+                        "path": "/jsonrpc",
+                        "status_code": 200,
+                        "headers": {"Content-Type": "application/json-rpc"},
+                        "body_snippet": '{"id":1,"jsonrpc":"2.0","result":{"version":"1.18.8"}}',
+                        "method": "POST",
+                        "request_headers": {"Content-Type": "application/json"},
+                        "request_body": '{"jsonrpc":"2.0","id":1,"method":"aria2.getVersion","params":[]}',
+                    },
+                }
+            ],
+            "pocs": [],
+            "reflections": [],
+            "actions": [
+                {
+                    "tool_name": "http_request",
+                    "stage": "observe",
+                    "success": True,
+                    "summary": "POST /jsonrpc returned HTTP 200.",
+                    "params": {
+                        "target": "127.0.0.1",
+                        "port": 6800,
+                        "scheme": "http",
+                        "path": "/jsonrpc",
+                        "method": "POST",
+                        "headers": {"Content-Type": "application/json"},
+                        "body": '{"jsonrpc":"2.0","id":1,"method":"aria2.getVersion","params":[]}',
+                    },
+                }
+            ],
+            "path_graph": {"nodes": [], "edges": []},
+        },
+    )
+    artifacts = [
+        ArtifactRecord(
+            id="artifact-1",
+            task_id=task.id,
+            artifact_type="http_request",
+            title="http_request output",
+            path="/tmp/http_request.json",
+            summary="POST /jsonrpc returned HTTP 200.",
+            created_at=now,
+        )
+    ]
+
+    markdown_content, html_content, report_path = agent.generate(task, [], [], artifacts)
+
+    assert "Auto-generated PoC draft" in markdown_content
+    assert "aria2.getVersion" in markdown_content
+    assert "/jsonrpc" in markdown_content
+    assert "Unauthenticated JSON-RPC method call succeeded" in markdown_content
+    assert "```http" in markdown_content
+    assert "/tmp/http_request.json" in markdown_content
     assert report_path.endswith("report.md")
     assert "<h2>PoC 明细</h2>" in html_content

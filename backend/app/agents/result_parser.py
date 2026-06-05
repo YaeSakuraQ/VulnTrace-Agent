@@ -24,6 +24,8 @@ class ResultParser:
             self._merge_web_probe(state, result.structured_data.get("responses", []))
         elif result.tool_name == "http_get":
             self._merge_http_get(state, result.structured_data)
+        elif result.tool_name == "http_request":
+            self._merge_http_request(state, result.structured_data)
         elif result.tool_name == "dir_enum":
             self._merge_dir_enum(state, result.structured_data.get("paths", []))
         elif result.tool_name == "ffuf_enum":
@@ -117,6 +119,22 @@ class ResultParser:
                 "target": self._extract_target(response.get("url", "")),
                 "port": self._extract_port(response.get("url", "")),
                 "summary": f"{response.get('path', '/')} -> {response.get('status_code', 0)} {response.get('title', '')}".strip(),
+                "data": response,
+            }
+        )
+
+    def _merge_http_request(self, state: dict[str, Any], response: dict[str, Any]) -> None:
+        if not response:
+            return
+        state.setdefault("evidence", []).append(
+            {
+                "kind": "http_request",
+                "target": self._extract_target(response.get("url", "")),
+                "port": self._extract_port(response.get("url", "")),
+                "summary": (
+                    f"{response.get('method', 'GET')} {response.get('path', '/')} -> "
+                    f"{response.get('status_code', 0)} {response.get('title', '')}"
+                ).strip(),
                 "data": response,
             }
         )

@@ -9,7 +9,7 @@ from app.agents.graph import PentestGraphRunner
 from app.agents.planner import PlannerService
 from app.agents.report_agent import ReportAgent
 from app.agents.result_parser import ResultParser
-from app.api import approvals, reports, tasks, websocket
+from app.api import approvals, learning_candidates, reports, tasks, websocket
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.scope_guard import ScopeGuard
@@ -19,6 +19,7 @@ from app.services.artifact_store import ArtifactStore
 from app.services.deepseek_client import DeepSeekClient
 from app.services.demo_template_service import DemoTemplateService
 from app.services.exploit_knowledge_mapper import ExploitKnowledgeMapper
+from app.services.knowledge_capture_service import KnowledgeCaptureService
 from app.services.knowledge_retriever import KnowledgeRetriever
 from app.services.task_runtime import TaskRuntime
 from app.services.task_service import TaskService
@@ -36,6 +37,7 @@ class Container:
     demo_template_service: DemoTemplateService
     exploit_mapper: ExploitKnowledgeMapper
     knowledge_retriever: KnowledgeRetriever
+    knowledge_capture_service: KnowledgeCaptureService
     deepseek_client: DeepSeekClient
     planner: PlannerService
     result_parser: ResultParser
@@ -57,11 +59,13 @@ def create_container() -> Container:
     demo_template_service = DemoTemplateService()
     exploit_mapper = ExploitKnowledgeMapper()
     knowledge_retriever = KnowledgeRetriever(settings.artifact_path.parent / "data" / "knowledge")
+    knowledge_capture_service = KnowledgeCaptureService(database)
     deepseek_client = DeepSeekClient(settings)
     planner = PlannerService(
         deepseek_client=deepseek_client,
         exploit_mapper=exploit_mapper,
         knowledge_retriever=knowledge_retriever,
+        knowledge_capture_service=knowledge_capture_service,
     )
     result_parser = ResultParser()
     report_agent = ReportAgent(artifact_store)
@@ -78,6 +82,7 @@ def create_container() -> Container:
         planner=planner,
         result_parser=result_parser,
         report_agent=report_agent,
+        knowledge_capture_service=knowledge_capture_service,
     )
     task_runtime = TaskRuntime(graph_runner)
     return Container(
@@ -90,6 +95,7 @@ def create_container() -> Container:
         demo_template_service=demo_template_service,
         exploit_mapper=exploit_mapper,
         knowledge_retriever=knowledge_retriever,
+        knowledge_capture_service=knowledge_capture_service,
         deepseek_client=deepseek_client,
         planner=planner,
         result_parser=result_parser,
@@ -115,6 +121,7 @@ def create_app() -> FastAPI:
 
     app.include_router(tasks.router, prefix=container.settings.api_prefix)
     app.include_router(approvals.router, prefix=container.settings.api_prefix)
+    app.include_router(learning_candidates.router, prefix=container.settings.api_prefix)
     app.include_router(reports.router, prefix=container.settings.api_prefix)
     app.include_router(websocket.router)
 

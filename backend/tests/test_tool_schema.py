@@ -8,6 +8,7 @@ from app.schemas.tool import (
     FfufEnumInput,
     HeaderMutationInput,
     HttpGetInput,
+    HttpRequestInput,
     HttpSnapshotInput,
     RawHttpInput,
     ServiceFingerprintInput,
@@ -64,13 +65,13 @@ def test_vuln_verify_accepts_profile_and_context() -> None:
         {
             "target": "127.0.0.1",
             "port": 8088,
-            "profile": "mini_httpd",
+            "profile": "json_rpc",
             "preferred_poc": "dvwa_fi",
             "service_product": "mini_httpd",
             "interesting_paths": ["/etc/passwd"],
         }
     )
-    assert payload.profile == "mini_httpd"
+    assert payload.profile == "json_rpc"
     assert payload.preferred_poc == "dvwa_fi"
     assert payload.service_product == "mini_httpd"
 
@@ -86,6 +87,22 @@ def test_http_get_accepts_custom_headers() -> None:
     )
     assert payload.path == "/robots.txt"
     assert payload.headers["Accept"] == "*/*"
+
+
+def test_http_request_accepts_post_body() -> None:
+    payload = HttpRequestInput.model_validate(
+        {
+            "target": "127.0.0.1",
+            "port": 6800,
+            "method": "POST",
+            "path": "/jsonrpc",
+            "headers": {"Content-Type": "application/json"},
+            "body": '{"jsonrpc":"2.0","method":"rpc.discover","params":[]}',
+        }
+    )
+    assert payload.method == "POST"
+    assert payload.path == "/jsonrpc"
+    assert payload.headers["Content-Type"] == "application/json"
 
 
 def test_header_mutation_accepts_empty_host_header() -> None:

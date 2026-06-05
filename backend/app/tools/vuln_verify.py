@@ -25,6 +25,7 @@ DVWA_FI_MARKERS = [
     "2.) My name is Sherlock Holmes.",
     "The pool on the roof must have a leak.",
 ]
+JSON_RPC_COMMON_PATHS = ["/jsonrpc", "/rpc", "/api/jsonrpc"]
 
 
 @dataclass(slots=True)
@@ -54,19 +55,39 @@ def execute(params: VulnerabilityVerifyInput, context: ToolContext) -> ToolExecu
     pocs: list[dict[str, Any]] = []
     verification_status = "inconclusive"
     extra_artifact_paths: list[str] = []
+    nikto_run: ScannerRun | None = None
 
-    nikto_run = _run_nikto(url, profile, params.timeout, context.artifact_dir)
-    scanner_runs.append(nikto_run)
-    evidence.append(
-        {
-            "kind": "nikto",
-            "target": params.target,
-            "port": params.port,
-            "summary": nikto_run.summary,
-            "data": nikto_run.data,
-        }
-    )
-    findings.extend(_findings_from_nikto(nikto_run.data.get("issues", [])))
+    if profile == "json_rpc":
+        rpc_run = _run_json_rpc_probe(params, context.artifact_dir)
+        scanner_runs.append(rpc_run)
+        evidence.append(
+            {
+                "kind": "json_rpc_probe",
+                "target": params.target,
+                "port": params.port,
+                "summary": rpc_run.summary,
+                "data": rpc_run.data,
+            }
+        )
+        findings.extend(rpc_run.data.get("findings", []))
+        pocs.extend(rpc_run.data.get("pocs", []))
+        if rpc_run.data.get("unauthenticated_method_call"):
+            verification_status = "confirmed"
+        elif rpc_run.success:
+            verification_status = "profiled"
+    else:
+        nikto_run = _run_nikto(url, profile, params.timeout, context.artifact_dir)
+        scanner_runs.append(nikto_run)
+        evidence.append(
+            {
+                "kind": "nikto",
+                "target": params.target,
+                "port": params.port,
+                "summary": nikto_run.summary,
+                "data": nikto_run.data,
+            }
+        )
+        findings.extend(_findings_from_nikto(nikto_run.data.get("issues", [])))
 
     if profile == "mini_httpd":
         probe_run = _run_mini_httpd_probe(params.target, params.port, context.artifact_dir)
@@ -92,7 +113,7 @@ def execute(params: VulnerabilityVerifyInput, context: ToolContext) -> ToolExecu
             )
         elif nikto_run.success or probe_run.success:
             verification_status = "not_reproduced"
-    else:
+    elif profile != "json_rpc":
         dvwa_signals = _collect_php_apache_signals(params)
         if dvwa_signals:
             evidence.append(
@@ -129,7 +150,7 @@ def execute(params: VulnerabilityVerifyInput, context: ToolContext) -> ToolExecu
                 )
             elif poc_run.attempted:
                 verification_status = "not_reproduced"
-        if nikto_run.success or dvwa_signals:
+        if (nikto_run and nikto_run.success) or dvwa_signals:
             verification_status = (
                 verification_status if verification_status != "inconclusive" else "profiled"
             )
@@ -168,7 +189,7 @@ def execute(params: VulnerabilityVerifyInput, context: ToolContext) -> ToolExecu
             "url": url,
             "profile": profile,
             "verification_status": verification_status,
-            "issues": nikto_run.data.get("issues", []),
+            "issues": nikto_run.data.get("issues", []) if nikto_run else [],
             "findings": findings,
             "evidence": evidence,
             "pocs": pocs,
@@ -196,6 +217,10 @@ def _select_profile(params: VulnerabilityVerifyInput) -> str:
 
     if "mini_httpd" in service_text:
         return "mini_httpd"
+    if any(marker in service_text for marker in ["aria2", "json-rpc", "json rpc", "xml-rpc"]):
+        return "json_rpc"
+    if any(path in path_text for path in JSON_RPC_COMMON_PATHS):
+        return "json_rpc"
     if "dvwa" in service_text:
         return "php_apache"
     if "apache" in service_text and "php" in header_text:
@@ -334,6 +359,205 @@ def _run_mini_httpd_probe(target: str, port: int, artifact_dir: Path) -> Scanner
             "artifact_path": str(probe_path),
         },
     )
+
+
+def _run_json_rpc_probe(params: VulnerabilityVerifyInput, artifact_dir: Path) -> ScannerRun:
+    service_text = " ".join(
+        [
+            params.service_name,
+            params.service_product,
+            params.service_version,
+            params.lab_description,
+            params.page_title,
+        ]
+    ).lower()
+    candidate_paths = _json_rpc_candidate_paths(params, service_text)
+    probe_methods = _json_rpc_probe_methods(service_text)
+    transcripts: list[dict[str, Any]] = []
+    findings: list[dict[str, str]] = []
+    pocs: list[dict[str, Any]] = []
+    unauthenticated_method_call = False
+    endpoint_profiled = False
+
+    for path in candidate_paths:
+        endpoint_url = f"{params.scheme}://{params.target}:{params.port}{path}"
+        for method_name, payload in probe_methods:
+            request_body = json.dumps(payload, separators=(",", ":"))
+            try:
+                response = requests.post(
+                    endpoint_url,
+                    headers={"Content-Type": "application/json"},
+                    data=request_body,
+                    timeout=min(params.timeout, 15),
+                    allow_redirects=False,
+                    verify=False,
+                )
+            except requests.RequestException as exc:
+                transcripts.append(
+                    {
+                        "path": path,
+                        "method": method_name,
+                        "request_body": request_body,
+                        "error": str(exc),
+                        "status_code": 0,
+                    }
+                )
+                continue
+
+            body_text = response.text[:2000]
+            parsed_body: dict[str, Any] | None = None
+            try:
+                parsed_body = response.json()
+            except ValueError:
+                parsed_body = None
+
+            transcripts.append(
+                {
+                    "path": path,
+                    "method": method_name,
+                    "request_body": request_body,
+                    "status_code": response.status_code,
+                    "headers": {str(key): str(value) for key, value in response.headers.items()},
+                    "body_preview": body_text[:400],
+                    "json": parsed_body,
+                }
+            )
+
+            if response.status_code == 200 and isinstance(parsed_body, dict):
+                endpoint_profiled = True
+                if "result" in parsed_body:
+                    unauthenticated_method_call = True
+                    findings.append(
+                        {
+                            "title": f"Unauthenticated JSON-RPC method call succeeded on {path}",
+                            "severity": "high",
+                            "confidence": "confirmed",
+                            "evidence_summary": f"Safe method `{method_name}` returned a JSON-RPC result without authentication.",
+                        }
+                    )
+                    pocs.append(
+                        {
+                            "id": f"json-rpc-{method_name.lower().replace('.', '-')}",
+                            "title": f"Unauthenticated JSON-RPC capability probe via {method_name}",
+                            "module": "json_rpc",
+                            "status": "confirmed",
+                            "method": "POST",
+                            "url": endpoint_url,
+                            "path": path,
+                            "params": payload,
+                            "request_excerpt": (
+                                f"POST {path} HTTP/1.1\n"
+                                "Content-Type: application/json\n\n"
+                                f"{request_body}"
+                            ),
+                            "response_excerpt": body_text[:400],
+                            "success_evidence": [json.dumps(parsed_body, ensure_ascii=False)[:200]],
+                            "notes": [
+                                "This is a safe capability probe proving unauthenticated JSON-RPC access.",
+                            ],
+                            "evidence_files": [],
+                        }
+                    )
+                    break
+
+                error_text = json.dumps(parsed_body.get("error", {}), ensure_ascii=False).lower()
+                if "auth" not in error_text and "forbidden" not in error_text and "permission" not in error_text:
+                    endpoint_profiled = True
+
+        if unauthenticated_method_call:
+            break
+
+    artifact_path = artifact_dir / "json_rpc_probe.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "paths": candidate_paths,
+                "probe_methods": [name for name, _ in probe_methods],
+                "unauthenticated_method_call": unauthenticated_method_call,
+                "endpoint_profiled": endpoint_profiled,
+                "findings": findings,
+                "pocs": pocs,
+                "transcripts": transcripts,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    if unauthenticated_method_call:
+        summary = "Safe JSON-RPC probing reproduced unauthenticated method access."
+    elif endpoint_profiled:
+        summary = "JSON-RPC endpoint accepted structured requests, but no safe method returned a result."
+    else:
+        summary = "JSON-RPC probing was inconclusive."
+
+    return ScannerRun(
+        name="json_rpc_probe",
+        success=unauthenticated_method_call or endpoint_profiled,
+        summary=summary,
+        data={
+            "paths": candidate_paths,
+            "probe_methods": [name for name, _ in probe_methods],
+            "unauthenticated_method_call": unauthenticated_method_call,
+            "endpoint_profiled": endpoint_profiled,
+            "findings": findings,
+            "pocs": pocs,
+            "transcripts": transcripts,
+            "artifact_path": str(artifact_path),
+        },
+    )
+
+
+def _json_rpc_candidate_paths(
+    params: VulnerabilityVerifyInput,
+    service_text: str,
+) -> list[str]:
+    paths: list[str] = []
+    for path in params.interesting_paths:
+        if path in JSON_RPC_COMMON_PATHS and path not in paths:
+            paths.append(path)
+    if "aria2" in service_text and "/jsonrpc" not in paths:
+        paths.insert(0, "/jsonrpc")
+    for path in JSON_RPC_COMMON_PATHS:
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _json_rpc_probe_methods(service_text: str) -> list[tuple[str, dict[str, Any]]]:
+    methods: list[tuple[str, dict[str, Any]]] = []
+    if "aria2" in service_text:
+        methods.append(
+            (
+                "aria2.getVersion",
+                {"jsonrpc": "2.0", "id": 1, "method": "aria2.getVersion", "params": []},
+            )
+        )
+    methods.extend(
+        [
+            (
+                "rpc.discover",
+                {"jsonrpc": "2.0", "id": 1, "method": "rpc.discover", "params": []},
+            ),
+            (
+                "system.listMethods",
+                {"jsonrpc": "2.0", "id": 1, "method": "system.listMethods", "params": []},
+            ),
+            (
+                "system.describe",
+                {"jsonrpc": "2.0", "id": 1, "method": "system.describe", "params": []},
+            ),
+        ]
+    )
+    dedup: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for name, payload in methods:
+        if name in seen:
+            continue
+        dedup.append((name, payload))
+        seen.add(name)
+    return dedup
 
 
 def _send_raw_http_request(target: str, port: int, request: str) -> str:

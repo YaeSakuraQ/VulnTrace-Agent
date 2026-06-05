@@ -88,6 +88,14 @@
         />
       </n-tab-pane>
 
+      <n-tab-pane name="learning" tab="经验">
+        <LearningCandidatePanel
+          :candidates="workspace.learningCandidates"
+          @approve="handleApproveLearningCandidate"
+          @reject="handleRejectLearningCandidate"
+        />
+      </n-tab-pane>
+
       <n-tab-pane name="timeline" tab="活动">
         <EventTimeline :events="workspace.events" />
       </n-tab-pane>
@@ -113,18 +121,22 @@ import { Pause, Play, Square } from '@lucide/vue'
 import AgentConsole from '../components/AgentConsole.vue'
 import ApprovalPanel from '../components/ApprovalPanel.vue'
 import EventTimeline from '../components/EventTimeline.vue'
+import LearningCandidatePanel from '../components/LearningCandidatePanel.vue'
 import PathGraph from '../components/PathGraph.vue'
 import ReportView from '../components/ReportView.vue'
 import { buildWsUrl } from '../api/client'
 import {
   approveAction,
+  approveLearningCandidate,
   editAndApproveAction,
   fetchApprovals,
   fetchArtifacts,
   fetchEvents,
+  fetchLearningCandidates,
   fetchReport,
   fetchTask,
   pauseTask,
+  rejectLearningCandidate,
   rejectAction,
   runTask,
   stopTask,
@@ -162,6 +174,7 @@ async function loadBundle() {
     workspace.task = await fetchTask(taskId)
     workspace.events = await fetchEvents(taskId)
     workspace.approvals = await fetchApprovals(taskId)
+    workspace.learningCandidates = await fetchLearningCandidates(taskId)
     workspace.artifacts = await fetchArtifacts(taskId)
     try {
       workspace.report = await fetchReport(taskId)
@@ -206,6 +219,7 @@ async function refreshTaskFragments() {
   const taskId = route.params.taskId
   workspace.task = await fetchTask(taskId)
   workspace.approvals = await fetchApprovals(taskId)
+  workspace.learningCandidates = await fetchLearningCandidates(taskId)
   workspace.artifacts = await fetchArtifacts(taskId)
   try {
     workspace.report = await fetchReport(taskId)
@@ -243,6 +257,22 @@ async function handleEditApprove(approval, editedParams) {
   await editAndApproveAction(approval.id, {
     note: 'Approved with parameter edits from UI.',
     edited_params: editedParams,
+  })
+  await loadBundle()
+}
+
+async function handleApproveLearningCandidate(candidate, editedAction, editedRecipe) {
+  await approveLearningCandidate(candidate.id, {
+    note: 'Approved from UI for reuse.',
+    edited_suggested_action: editedAction,
+    edited_verification_recipe: editedRecipe,
+  })
+  await loadBundle()
+}
+
+async function handleRejectLearningCandidate(candidate) {
+  await rejectLearningCandidate(candidate.id, {
+    note: 'Rejected from UI.',
   })
   await loadBundle()
 }

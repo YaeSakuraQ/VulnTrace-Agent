@@ -5,6 +5,7 @@ export function createWorkspaceState() {
     task: null,
     events: [],
     approvals: [],
+    learningCandidates: [],
     artifacts: [],
     report: null,
     activeTab: 'overview',

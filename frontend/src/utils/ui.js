@@ -91,6 +91,7 @@ export function decisionSourceLabel(source) {
     mapper: '知识库候选',
     corpus: '知识库候选',
     corpus_reflection: '反思派生候选',
+    learning: '已审核经验',
   }
 
   return labels[source] || source || '未知'
@@ -104,6 +105,7 @@ export function decisionSourceType(source) {
     mapper: 'info',
     corpus: 'info',
     corpus_reflection: 'warning',
+    learning: 'success',
   }
 
   return map[source] || 'default'
@@ -117,6 +119,7 @@ export function failureClassLabel(failureClass) {
     target_not_found: '目标未命中',
     timeout: '超时',
     unexpected_redirect: '意外跳转',
+    method_not_found: '方法不存在',
   }
 
   return labels[failureClass] || failureClass || '未知'

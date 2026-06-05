@@ -23,6 +23,11 @@ class DummyDeepSeekClient:
     enabled = False
 
 
+class DummyKnowledgeCaptureService:
+    def suggest(self, state):
+        return []
+
+
 class FakeToolExecutor:
     def __init__(self, artifact_root: Path) -> None:
         self.artifact_root = artifact_root
@@ -70,6 +75,24 @@ class FakeToolExecutor:
                     "title": "404 Not Found",
                     "headers": {"server": "mini_httpd"},
                     "body_snippet": "404 Not Found",
+                },
+                artifact_paths=[str(artifact_path)],
+            )
+        if tool_name == "http_request":
+            return ToolExecutionResult(
+                tool_name=tool_name,
+                success=True,
+                summary="HTTP request completed",
+                structured_data={
+                    "url": "http://127.0.0.1:6800/jsonrpc",
+                    "path": "/jsonrpc",
+                    "status_code": 200,
+                    "title": "",
+                    "headers": {"content-type": "application/json-rpc"},
+                    "body_snippet": '{"id":1,"jsonrpc":"2.0","result":{"version":"1.18.8"}}',
+                    "method": "POST",
+                    "request_headers": {"Content-Type": "application/json"},
+                    "request_body": '{"jsonrpc":"2.0","id":1,"method":"aria2.getVersion","params":[]}',
                 },
                 artifact_paths=[str(artifact_path)],
             )
@@ -213,6 +236,7 @@ def build_graph_runner(
         deepseek_client=DummyDeepSeekClient(),
         exploit_mapper=ExploitKnowledgeMapper(),
         knowledge_retriever=KnowledgeRetriever(tmp_path / "knowledge"),
+        knowledge_capture_service=DummyKnowledgeCaptureService(),
     )
     graph_runner = PentestGraphRunner(
         task_service=task_service,
@@ -304,9 +328,17 @@ def test_planner_treats_local_dev_ports_as_web_services(tmp_path: Path) -> None:
         deepseek_client=DummyDeepSeekClient(),
         exploit_mapper=ExploitKnowledgeMapper(),
         knowledge_retriever=KnowledgeRetriever(tmp_path / "knowledge"),
+        knowledge_capture_service=DummyKnowledgeCaptureService(),
     )
 
-    plan = planner.plan(
+    verifier_planner = PlannerService(
+        deepseek_client=DummyDeepSeekClient(),
+        exploit_mapper=ExploitKnowledgeMapper(),
+        knowledge_retriever=KnowledgeRetriever(tmp_path / "knowledge"),
+        knowledge_capture_service=DummyKnowledgeCaptureService(),
+    )
+
+    plan = verifier_planner.plan(
         {
             "scope": ["127.0.0.1"],
             "hosts": [{"address": "127.0.0.1", "status": "up"}],
@@ -339,6 +371,7 @@ def test_planner_allows_mini_httpd_verification_even_with_404_only_evidence(tmp_
         deepseek_client=DummyDeepSeekClient(),
         exploit_mapper=ExploitKnowledgeMapper(),
         knowledge_retriever=KnowledgeRetriever(tmp_path / "knowledge"),
+        knowledge_capture_service=DummyKnowledgeCaptureService(),
     )
 
     plan = planner.plan(
@@ -388,6 +421,7 @@ def test_planner_prioritizes_reflection_candidates_over_corpus_candidates(tmp_pa
         deepseek_client=DummyDeepSeekClient(),
         exploit_mapper=ExploitKnowledgeMapper(),
         knowledge_retriever=KnowledgeRetriever(tmp_path / "knowledge"),
+        knowledge_capture_service=DummyKnowledgeCaptureService(),
     )
 
     plan = planner.plan(
@@ -433,3 +467,184 @@ def test_planner_prioritizes_reflection_candidates_over_corpus_candidates(tmp_pa
 
     assert plan.tool_name == "raw_http"
     assert plan.source == "corpus_reflection"
+
+
+def test_planner_normalizes_reflection_http_post_candidates(tmp_path: Path) -> None:
+    planner = PlannerService(
+        deepseek_client=DummyDeepSeekClient(),
+        exploit_mapper=ExploitKnowledgeMapper(),
+        knowledge_retriever=KnowledgeRetriever(tmp_path / "knowledge"),
+        knowledge_capture_service=DummyKnowledgeCaptureService(),
+    )
+
+    plan = planner.plan(
+        {
+            "scope": ["127.0.0.1"],
+            "hosts": [{"address": "127.0.0.1", "status": "up"}],
+            "services": [
+                {
+                    "target": "127.0.0.1",
+                    "port": 6800,
+                    "protocol": "tcp",
+                    "service": "http",
+                    "product": "aria2 downloader JSON-RPC",
+                    "version": "1.18.8",
+                }
+            ],
+            "evidence": [],
+            "actions": [],
+            "last_reflection": {
+                "summary": "Try a safe JSON-RPC POST first.",
+                "next_candidates": [
+                    {
+                        "stage": "enumerate",
+                        "tool_name": "http_post",
+                        "params": {
+                            "target": "127.0.0.1",
+                            "port": 6800,
+                            "scheme": "http",
+                            "path": "/jsonrpc",
+                            "headers": {"Content-Type": "application/json"},
+                            "body": '{"jsonrpc":"2.0","id":1,"method":"aria2.getVersion","params":[]}',
+                            "allow_redirects": False,
+                            "timeout": 15,
+                        },
+                        "rationale": "Reflection-derived safe RPC probe.",
+                        "expected_evidence": ["JSON-RPC result"],
+                        "source": "reflection",
+                    }
+                ],
+            },
+            "current_stage": "reflect",
+            "objective": "Confirm unauthorized JSON-RPC access on a local lab target",
+        }
+    )
+
+    assert plan.tool_name == "http_request"
+    assert plan.params["method"] == "POST"
+    assert plan.params["path"] == "/jsonrpc"
+
+
+def test_planner_chooses_generic_verifier_for_rpc_like_targets(tmp_path: Path) -> None:
+    planner = PlannerService(
+        deepseek_client=DummyDeepSeekClient(),
+        exploit_mapper=ExploitKnowledgeMapper(),
+        knowledge_retriever=KnowledgeRetriever(tmp_path / "knowledge"),
+        knowledge_capture_service=DummyKnowledgeCaptureService(),
+    )
+
+
+def test_planner_prioritizes_approved_learning_candidates(tmp_path: Path) -> None:
+    class LearningStub:
+        def suggest(self, state):
+            from app.services.exploit_knowledge_mapper import ExploitCandidate
+
+            return [
+                ExploitCandidate(
+                    id="learned-json-rpc",
+                    title="Reviewed JSON-RPC safe probe",
+                    tool_name="http_request",
+                    stage="enumerate",
+                    params={
+                        "target": "127.0.0.1",
+                        "port": 6800,
+                        "scheme": "http",
+                        "path": "/jsonrpc",
+                        "method": "POST",
+                        "headers": {"Content-Type": "application/json"},
+                        "body": '{"jsonrpc":"2.0","id":1,"method":"aria2.getVersion","params":[]}',
+                        "allow_redirects": False,
+                        "timeout": 15,
+                    },
+                    rationale="Reuse reviewed experience first.",
+                    expected_evidence=["JSON-RPC result"],
+                    risk_level="medium",
+                    requires_approval=False,
+                    confidence="high",
+                    source="learning",
+                )
+            ]
+
+    planner = PlannerService(
+        deepseek_client=DummyDeepSeekClient(),
+        exploit_mapper=ExploitKnowledgeMapper(),
+        knowledge_retriever=KnowledgeRetriever(tmp_path / "knowledge"),
+        knowledge_capture_service=LearningStub(),
+    )
+
+    plan = planner.plan(
+        {
+            "scope": ["127.0.0.1"],
+            "hosts": [{"address": "127.0.0.1", "status": "up"}],
+            "services": [
+                {
+                    "target": "127.0.0.1",
+                    "port": 6800,
+                    "protocol": "tcp",
+                    "service": "http",
+                    "product": "aria2 downloader JSON-RPC",
+                    "version": "1.18.8",
+                }
+            ],
+            "evidence": [],
+            "actions": [],
+            "current_stage": "observe",
+            "objective": "Reuse reviewed experience before generic corpus candidates",
+        }
+    )
+
+    assert plan.tool_name == "http_request"
+    assert plan.source == "learning"
+
+    verifier_planner = PlannerService(
+        deepseek_client=DummyDeepSeekClient(),
+        exploit_mapper=ExploitKnowledgeMapper(),
+        knowledge_retriever=KnowledgeRetriever(tmp_path / "knowledge"),
+        knowledge_capture_service=DummyKnowledgeCaptureService(),
+    )
+
+    plan = verifier_planner.plan(
+        {
+            "scope": ["127.0.0.1"],
+            "hosts": [{"address": "127.0.0.1", "status": "up"}],
+            "services": [
+                {
+                    "target": "127.0.0.1",
+                    "port": 6800,
+                    "protocol": "tcp",
+                    "service": "http",
+                    "product": "aria2 downloader JSON-RPC",
+                    "version": "1.18.8",
+                }
+            ],
+            "evidence": [
+                {
+                    "kind": "http_request",
+                    "target": "127.0.0.1",
+                    "port": 6800,
+                    "data": {
+                        "path": "/jsonrpc",
+                        "status_code": 200,
+                        "headers": {"content-type": "application/json-rpc"},
+                        "body_snippet": '{"id":1,"jsonrpc":"2.0","result":{"version":"1.18.8"}}',
+                    },
+                }
+            ],
+            "actions": [
+                {
+                    "tool_name": "http_request",
+                    "params": {
+                        "target": "127.0.0.1",
+                        "port": 6800,
+                        "path": "/jsonrpc",
+                        "method": "POST",
+                    },
+                }
+            ],
+            "current_stage": "observe",
+            "objective": "Confirm whether the local RPC surface allows unauthorized capability probes",
+        }
+    )
+
+    assert plan.tool_name == "vuln_verify"
+    assert plan.params["profile"] == "json_rpc"

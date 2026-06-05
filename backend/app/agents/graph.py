@@ -20,6 +20,7 @@ from app.agents.report_agent import ReportAgent
 from app.core.scope_guard import ScopeGuard, ScopeValidationError
 from app.schemas.task import TaskUpdate
 from app.services.approval_service import ApprovalService
+from app.services.knowledge_capture_service import KnowledgeCaptureService
 from app.services.task_service import TaskService
 from app.services.tool_executor import ToolExecutor
 from app.tools.base import ToolExecutionError
@@ -36,6 +37,7 @@ class PentestGraphRunner:
         planner: PlannerService,
         result_parser: ResultParser,
         report_agent: ReportAgent,
+        knowledge_capture_service: KnowledgeCaptureService | None = None,
     ) -> None:
         self.task_service = task_service
         self.approval_service = approval_service
@@ -44,6 +46,7 @@ class PentestGraphRunner:
         self.planner = planner
         self.result_parser = result_parser
         self.report_agent = report_agent
+        self.knowledge_capture_service = knowledge_capture_service
         self.graph = self._build_graph()
 
     def run(self, task_id: str) -> dict[str, Any]:
@@ -455,6 +458,20 @@ class PentestGraphRunner:
             message=f"Task finished with status {final_status}.",
             payload={"stop_reason": state.get("stop_reason")},
         )
+        if self.knowledge_capture_service and final_status in {"completed", "failed"}:
+            task = self.task_service.get_task(state["task_id"])
+            events = self.task_service.list_events(task.id)
+            approvals = self.approval_service.list_approvals(task.id)
+            artifacts = self.task_service.list_artifacts(task.id)
+            created = self.knowledge_capture_service.capture_from_task(task, events, approvals, artifacts)
+            if created:
+                self.task_service.add_event(
+                    state["task_id"],
+                    event_type="learning_candidates_generated",
+                    stage="finish",
+                    message=f"Generated {len(created)} learning candidate(s) for review.",
+                    payload={"candidate_ids": [item.id for item in created]},
+                )
         return state
 
     def _derive_terminal_status(self, state: AgentState) -> str:

@@ -69,3 +69,23 @@ export async function fetchReport(taskId) {
   const { data } = await apiClient.get(`/reports/${taskId}`)
   return data
 }
+
+export async function fetchLearningCandidates(taskId, status = null) {
+  const { data } = await apiClient.get('/learning-candidates', {
+    params: {
+      task_id: taskId,
+      status,
+    },
+  })
+  return data
+}
+
+export async function approveLearningCandidate(candidateId, payload) {
+  const { data } = await apiClient.post(`/learning-candidates/${candidateId}/approve`, payload)
+  return data
+}
+
+export async function rejectLearningCandidate(candidateId, payload) {
+  const { data } = await apiClient.post(`/learning-candidates/${candidateId}/reject`, payload)
+  return data
+}
