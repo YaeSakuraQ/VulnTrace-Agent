@@ -71,8 +71,16 @@
               <n-empty v-else description="暂无发现" />
             </n-card>
 
-            <n-card title="PoC 链路" size="small" embedded>
-              <div v-if="pocs.length" class="stack">
+            <n-card title="PoC Chain" size="small" embedded>
+              <template v-if="pocs.length">
+                <n-alert
+                  v-if="!directPocs.length"
+                  type="info"
+                  :show-icon="true"
+                  style="margin-bottom: 12px"
+                >
+                  Synthesized from confirmed findings. Re-run report generation to persist PoC records.
+                </n-alert>
                 <n-card
                   v-for="poc in pocs"
                   :key="`${poc.id}-${poc.url}`"
@@ -135,8 +143,8 @@
                     </n-collapse>
                   </div>
                 </n-card>
-              </div>
-              <n-empty v-else description="暂无 PoC 记录" />
+              </template>
+              <n-empty v-else description="No PoC records yet" />
             </n-card>
           </div>
 
@@ -200,6 +208,7 @@
 <script setup>
 import { computed } from 'vue'
 import {
+  NAlert,
   NCard,
   NCode,
   NCollapse,
@@ -243,11 +252,50 @@ const props = defineProps({
 })
 
 const findings = computed(() => props.task?.state?.findings || [])
-const pocs = computed(() => props.task?.state?.pocs || [])
+const directPocs = computed(() => props.task?.state?.pocs || [])
+
+// Synthesize PoCs from confirmed findings when state.pocs is empty
+const pocs = computed(() => {
+  if (directPocs.value.length) return directPocs.value
+  const confirmed = findings.value.filter(
+    f => String(f.confidence || '').toLowerCase() === 'confirmed'
+  )
+  if (!confirmed.length) return []
+
+  // Derive PoC-like entries from confirmed findings and related actions
+  const actions = props.task?.state?.actions || []
+  return confirmed.map((f, idx) => {
+    const relatedAction = actions.find(a =>
+      a.summary && f.evidence_summary && (
+        f.evidence_summary.includes(a.tool_name) ||
+        a.tool_name === 'header_mutation' || a.tool_name === 'raw_http' ||
+        a.tool_name === 'vuln_verify'
+      )
+    ) || actions[actions.length - 1]
+
+    return {
+      id: `synth-${idx}`,
+      title: f.title || 'Confirmed finding',
+      status: String(f.confidence || 'confirmed'),
+      module: relatedAction?.tool_name || 'unknown',
+      method: '—',
+      path: '—',
+      url: '',
+      params: relatedAction?.params || {},
+      request_excerpt: relatedAction?.summary || '',
+      response_excerpt: '',
+      success_evidence: [f.evidence_summary || ''],
+      evidence_files: [],
+      _synthesized: true,
+    }
+  })
+})
+
 const confirmedFindingCount = computed(() => countConfirmedFindings(findings.value))
 
 const sanitizedHtml = computed(() => {
   const rawMarkdown = props.report?.markdown || ''
+  if (!rawMarkdown) return ''
   const html = marked.parse(rawMarkdown)
   return DOMPurify.sanitize(html)
 })

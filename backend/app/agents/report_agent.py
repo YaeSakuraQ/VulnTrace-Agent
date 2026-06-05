@@ -264,6 +264,9 @@ class ReportAgent:
             state,
             artifacts,
         )
+        # Write synthesized PoCs back to state so the frontend Summary tab can display them
+        if synthesized:
+            state.setdefault("pocs", []).extend(synthesized)
         return synthesized or []
 
     def _synthesize_pocs_from_confirmed_findings(

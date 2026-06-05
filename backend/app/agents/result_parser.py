@@ -221,6 +221,36 @@ class ResultParser:
                     "evidence_summary": "The response preview contained /etc/passwd markers after a concrete exploit request.",
                 }
             )
+            # ── Also create a PoC record so the frontend summary tab shows it ──
+            poc_id = f"{tool_name}-file-read-{target}-{port}"
+            existing_keys = {
+                (str(i.get("id", "")), str(i.get("url", "")))
+                for i in state.get("pocs", [])
+            }
+            poc_key = (
+                poc_id,
+                f"http://{target}:{port}{result.get('path', '/')}",
+            )
+            if poc_key not in existing_keys:
+                state.setdefault("pocs", []).append(
+                    {
+                        "id": poc_id,
+                        "title": "Arbitrary file read (e.g. /etc/passwd)",
+                        "status": "confirmed",
+                        "module": tool_name,
+                        "method": result.get("method", "GET"),
+                        "path": result.get("path", "/etc/passwd"),
+                        "url": f"http://{target}:{port}{result.get('path', '/etc/passwd')}",
+                        "params": result.get("raw_request", ""),
+                        "request_excerpt": result.get("raw_request", "")[:600],
+                        "response_excerpt": result.get("raw_response", "")[:600],
+                        "success_evidence": [
+                            "/etc/passwd content confirmed",
+                            body_preview[:120],
+                        ],
+                        "evidence_files": [],
+                    }
+                )
 
     def _merge_tcp_send(self, state: dict[str, Any], result: dict[str, Any]) -> None:
         target = state.get("scope", [""])[0]
